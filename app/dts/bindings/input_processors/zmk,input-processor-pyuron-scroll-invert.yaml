@@ -1,0 +1,14 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: >
+  Pyuron scroll-direction inverter.
+  Inverts the sign of INPUT_REL_WHEEL (vertical) and/or INPUT_REL_HWHEEL
+  (horizontal) scroll events at runtime.  The invert_v / invert_h flags can
+  be toggled live via the "pyuron_scroll" custom Studio RPC (requires
+  CONFIG_PYURON_SCROLL_STUDIO_RPC=y) and are persisted to NVS.
+  All other input codes pass through unchanged.
+
+compatible: "zmk,input-processor-pyuron-scroll-invert"
+
+include: ip_zero_param.yaml

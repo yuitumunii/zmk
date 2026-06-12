@@ -55,6 +55,22 @@ config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
       Requires the ZMK fork with custom-studio-protocol support.
       Changes are persisted to NVS and survive reboot.
 
+config ZMK_INPUT_PROCESSOR_PYURON_SCROLL_INVERT
+    bool "Pyuron scroll-direction inverter input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_PYURON_SCROLL_INVERT_ENABLED
+
+config PYURON_SCROLL_STUDIO_RPC
+    bool "Pyuron scroll-invert Studio RPC (live toggle via ZMK Studio)"
+    depends on ZMK_INPUT_PROCESSOR_PYURON_SCROLL_INVERT
+    select SETTINGS
+    help
+      Expose scroll-direction inversion flags (invert_v / invert_h) via a
+      custom Studio RPC subsystem "pyuron_scroll".  Lets the ZMK Studio app
+      toggle Win/Mac natural-scroll direction at runtime without reflashing.
+      Requires the ZMK fork with custom-studio-protocol support.
+      Changes are persisted to NVS and survive reboot.
+
 endif
 
 config ZMK_INPUT_PROCESSOR_TRANSFORM

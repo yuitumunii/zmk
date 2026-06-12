@@ -1,0 +1,21 @@
+/*
+ * Copyright (c) 2026 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ *
+ * Default node for the Pyuron scroll-invert processor.
+ * Include via <input/processors.dtsi> (already added there).
+ *
+ * Usage in a listener's input-processors array:
+ *   input-processors = <...>, <&zip_pyuron_scroll_invert>, <...>;
+ *
+ * Runtime invert_v / invert_h flags default to false (no inversion).
+ * Toggle them live with the "pyuron_scroll" Studio RPC subsystem.
+ */
+
+/ {
+    /omit-if-no-ref/ zip_pyuron_scroll_invert: zip_pyuron_scroll_invert {
+        compatible = "zmk,input-processor-pyuron-scroll-invert";
+        #input-processor-cells = <0>;
+    };
+};

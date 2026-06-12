@@ -1,0 +1,3 @@
+# nanopb size constraints for scroll.proto — fixed sizes, no heap.
+# Error message needs to fit a short C error string.
+pyuron.scroll.ErrorResponse.message max_size:64

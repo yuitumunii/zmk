@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package pyuron.scroll;
+
+// Runtime state of the Pyuron scroll-invert processor.
+// Both flags fit in < 10 bytes wire-encoded — well within one Studio RPC frame.
+message ScrollInfo {
+    bool invert_v = 1;  // invert vertical scroll (INPUT_REL_WHEEL)
+    bool invert_h = 2;  // invert horizontal scroll (INPUT_REL_HWHEEL)
+}
+
+// Get: return current flags.
+message GetRequest {}
+
+// Set: overwrite both flags atomically and persist to NVS.
+message SetRequest {
+    bool invert_v = 1;
+    bool invert_h = 2;
+}
+
+message Request {
+    oneof request_type {
+        GetRequest get = 1;
+        SetRequest set = 2;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        ScrollInfo    info  = 2;
+    }
+}
