@@ -18,6 +18,13 @@
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/behavior.h>
+#include <zmk/behaviors/hold_tap_tuning.h>
+#if IS_ENABLED(CONFIG_PYURON_TIMING_STUDIO_RPC)
+#include <errno.h>
+#include <stdlib.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/settings/settings.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -54,6 +61,9 @@ enum decision_moment {
 
 struct behavior_hold_tap_config {
     int tapping_term_ms;
+#if IS_ENABLED(CONFIG_PYURON_TIMING_STUDIO_RPC)
+    const char *name; // devicetree node name, exposed over the timing RPC
+#endif
     char *hold_behavior_dev;
     char *tap_behavior_dev;
     int quick_tap_ms;
@@ -71,6 +81,16 @@ struct behavior_hold_tap_data {
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
     struct behavior_parameter_metadata_set set;
 #endif // IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+
+    // Runtime-tunable timing params. Seeded from the const config at init, then
+    // mutable at runtime via the custom Studio RPC (see studio/timing_handler.c).
+    // The decision logic reads these (data->) instead of the const config
+    // (config->), so changes take effect live without reflashing. When
+    // CONFIG_PYURON_TIMING_STUDIO_RPC is off these simply mirror the config and
+    // never change, so behavior is identical to upstream.
+    int tapping_term_ms;
+    int quick_tap_ms;
+    enum flavor flavor;
 };
 
 // this data is specific for each hold-tap
@@ -84,6 +104,9 @@ struct active_hold_tap {
     int64_t timestamp;
     enum status status;
     const struct behavior_hold_tap_config *config;
+    // RAM-resident, runtime-tunable timing params for this instance (see
+    // behavior_hold_tap_data). Set alongside config in store_hold_tap.
+    struct behavior_hold_tap_data *data;
     struct k_work_delayable work;
     bool work_is_cancelled;
 
@@ -146,7 +169,7 @@ static bool is_quick_tap(struct active_hold_tap *hold_tap) {
         return true;
     } else {
         return (last_tapped.position == hold_tap->position) &&
-               (last_tapped.timestamp + hold_tap->config->quick_tap_ms) > hold_tap->timestamp;
+               (last_tapped.timestamp + hold_tap->data->quick_tap_ms) > hold_tap->timestamp;
     }
 }
 
@@ -254,7 +277,8 @@ static struct active_hold_tap *find_hold_tap(uint32_t position) {
 
 static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event *event,
                                               uint32_t param_hold, uint32_t param_tap,
-                                              const struct behavior_hold_tap_config *config) {
+                                              const struct behavior_hold_tap_config *config,
+                                              struct behavior_hold_tap_data *data) {
     for (int i = 0; i < ZMK_BHV_HOLD_TAP_MAX_HELD; i++) {
         if (active_hold_taps[i].position != ZMK_BHV_HOLD_TAP_POSITION_NOT_USED) {
             continue;
@@ -265,6 +289,7 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
 #endif
         active_hold_taps[i].status = STATUS_UNDECIDED;
         active_hold_taps[i].config = config;
+        active_hold_taps[i].data = data;
         active_hold_taps[i].param_hold = param_hold;
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
@@ -543,7 +568,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     }
 
     // If the hold-tap behavior is still undecided, attempt to decide it.
-    switch (hold_tap->config->flavor) {
+    switch (hold_tap->data->flavor) {
     case FLAVOR_HOLD_PREFERRED:
         decide_hold_preferred(hold_tap, decision_moment);
         break;
@@ -567,7 +592,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     // Since the hold-tap has been decided, clean up undecided_hold_tap and
     // execute the decided behavior.
     LOG_DBG("%d decided %s (%s decision moment %s)", hold_tap->position,
-            status_str(hold_tap->status), flavor_str(hold_tap->config->flavor),
+            status_str(hold_tap->status), flavor_str(hold_tap->data->flavor),
             decision_moment_str(decision_moment));
     undecided_hold_tap = NULL;
     press_binding(hold_tap);
@@ -607,6 +632,7 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
                                        struct zmk_behavior_binding_event event) {
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     const struct behavior_hold_tap_config *cfg = dev->config;
+    struct behavior_hold_tap_data *dev_data = dev->data;
 
     if (undecided_hold_tap != NULL) {
         LOG_DBG("ERROR another hold-tap behavior is undecided.");
@@ -615,7 +641,7 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     }
 
     struct active_hold_tap *hold_tap =
-        store_hold_tap(&event, binding->param1, binding->param2, cfg);
+        store_hold_tap(&event, binding->param1, binding->param2, cfg, dev_data);
 
     if (hold_tap == NULL) {
         LOG_ERR("unable to store hold-tap info, did you press more than %d hold-taps?",
@@ -634,7 +660,8 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
 
     // if this behavior was queued we have to adjust the timer to only
     // wait for the remaining time.
-    int32_t tapping_term_ms_left = (hold_tap->timestamp + cfg->tapping_term_ms) - k_uptime_get();
+    int32_t tapping_term_ms_left =
+        (hold_tap->timestamp + hold_tap->data->tapping_term_ms) - k_uptime_get();
     k_work_schedule(&hold_tap->work, K_MSEC(tapping_term_ms_left));
 
     return ZMK_BEHAVIOR_OPAQUE;
@@ -651,7 +678,7 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
     // If these events were queued, the timer event may be queued too late or not at all.
     // We insert a timer event before the TH_KEY_UP event to verify.
     int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
-    if (event.timestamp > (hold_tap->timestamp + hold_tap->config->tapping_term_ms)) {
+    if (event.timestamp > (hold_tap->timestamp + hold_tap->data->tapping_term_ms)) {
         decide_hold_tap(hold_tap, HT_TIMER_EVENT);
     }
 
@@ -758,7 +785,7 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
     // We make a timer decision before the other key events are handled if the timer would
     // have run out.
     if (ev->timestamp >
-        (undecided_hold_tap->timestamp + undecided_hold_tap->config->tapping_term_ms)) {
+        (undecided_hold_tap->timestamp + undecided_hold_tap->data->tapping_term_ms)) {
         decide_hold_tap(undecided_hold_tap, HT_TIMER_EVENT);
     }
 
@@ -845,6 +872,15 @@ void behavior_hold_tap_timer_work_handler(struct k_work *item) {
 }
 
 static int behavior_hold_tap_init(const struct device *dev) {
+    // Seed this instance's runtime-tunable timing params from its devicetree
+    // (flashed) config. Runs once per instance. After this the decision logic
+    // reads data->, which the custom Studio RPC can change live.
+    const struct behavior_hold_tap_config *cfg = dev->config;
+    struct behavior_hold_tap_data *data = dev->data;
+    data->tapping_term_ms = cfg->tapping_term_ms;
+    data->quick_tap_ms = cfg->quick_tap_ms;
+    data->flavor = cfg->flavor;
+
     static bool init_first_run = true;
 
     if (init_first_run) {
@@ -860,6 +896,8 @@ static int behavior_hold_tap_init(const struct device *dev) {
 #define KP_INST(n)                                                                                 \
     static const struct behavior_hold_tap_config behavior_hold_tap_config_##n = {                  \
         .tapping_term_ms = DT_INST_PROP(n, tapping_term_ms),                                       \
+        IF_ENABLED(CONFIG_PYURON_TIMING_STUDIO_RPC,                                                \
+                   (.name = DT_NODE_FULL_NAME(DT_DRV_INST(n)), ))                                  \
         .hold_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 0)),               \
         .tap_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 1)),                \
         .quick_tap_ms = DT_INST_PROP(n, quick_tap_ms),                                             \
@@ -880,5 +918,130 @@ static int behavior_hold_tap_init(const struct device *dev) {
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_hold_tap_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
+
+#if IS_ENABLED(CONFIG_PYURON_TIMING_STUDIO_RPC)
+
+/* Runtime registry + tuning API used by the custom Studio RPC handler
+ * (src/studio/timing_handler.c). Declared in include/zmk/behaviors/hold_tap_tuning.h.
+ * All getters/setters operate on the RAM-resident params in
+ * behavior_hold_tap_data, so changes take effect immediately without reflashing. */
+
+#define HOLD_TAP_DEV(n) DEVICE_DT_INST_GET(n),
+
+static const struct device *const hold_tap_devs[] = {DT_INST_FOREACH_STATUS_OKAY(HOLD_TAP_DEV)};
+
+#define HOLD_TAP_FLAVOR_COUNT 4
+
+int hold_tap_tuning_get_count(void) { return ARRAY_SIZE(hold_tap_devs); }
+
+int hold_tap_tuning_get_info(uint32_t id, struct hold_tap_tuning_info *out) {
+    if (id >= ARRAY_SIZE(hold_tap_devs) || out == NULL) {
+        return -EINVAL;
+    }
+    const struct device *dev = hold_tap_devs[id];
+    const struct behavior_hold_tap_config *cfg = dev->config;
+    const struct behavior_hold_tap_data *data = dev->data;
+
+    out->name = cfg->name;
+    out->tapping_term_ms = (uint32_t)data->tapping_term_ms;
+    out->quick_tap_ms = data->quick_tap_ms;
+    out->flavor = (uint32_t)data->flavor;
+    return 0;
+}
+
+int hold_tap_tuning_set_param(uint32_t id, enum hold_tap_tuning_param param, int32_t value) {
+    if (id >= ARRAY_SIZE(hold_tap_devs)) {
+        return -EINVAL;
+    }
+    const struct device *dev = hold_tap_devs[id];
+    struct behavior_hold_tap_data *data = dev->data;
+
+    switch (param) {
+    case HOLD_TAP_TUNING_PARAM_TAPPING_TERM_MS:
+        // A 0ms term would decide instantly; keep at least 1ms.
+        data->tapping_term_ms = MAX(value, 1);
+        break;
+    case HOLD_TAP_TUNING_PARAM_QUICK_TAP_MS:
+        // Signed: -1 (or any negative) means "disabled", matching the binding.
+        data->quick_tap_ms = value;
+        break;
+    case HOLD_TAP_TUNING_PARAM_FLAVOR:
+        if (value < 0 || value >= HOLD_TAP_FLAVOR_COUNT) {
+            return -EINVAL;
+        }
+        data->flavor = (enum flavor)value;
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+}
+
+// --- NVS persistence (Zephyr settings) ----------------------------------
+// Saved values survive reboot. Keys are "ht/<id>/<param>" holding an int32.
+// On boot ZMK's settings_load() replays them via ht_settings_set, which
+// re-applies into RAM after the devicetree defaults were seeded at init.
+
+#define HOLD_TAP_TUNING_SETTINGS_SUBTREE "ht"
+#define HOLD_TAP_TUNING_PARAM_COUNT 3
+
+static void hold_tap_tuning_settings_key(char *buf, size_t len, uint32_t id, uint32_t param) {
+    snprintf(buf, len, HOLD_TAP_TUNING_SETTINGS_SUBTREE "/%u/%u", id, param);
+}
+
+int hold_tap_tuning_save_param(uint32_t id, enum hold_tap_tuning_param param, int32_t value) {
+    char key[24];
+    hold_tap_tuning_settings_key(key, sizeof(key), id, (uint32_t)param);
+    return settings_save_one(key, &value, sizeof(value));
+}
+
+int hold_tap_tuning_reset(uint32_t id) {
+    if (id >= ARRAY_SIZE(hold_tap_devs)) {
+        return -EINVAL;
+    }
+    const struct device *dev = hold_tap_devs[id];
+    const struct behavior_hold_tap_config *cfg = dev->config;
+    struct behavior_hold_tap_data *data = dev->data;
+
+    data->tapping_term_ms = cfg->tapping_term_ms;
+    data->quick_tap_ms = cfg->quick_tap_ms;
+    data->flavor = cfg->flavor;
+
+    // Drop any persisted overrides so the flashed defaults stick across reboot.
+    for (uint32_t p = 0; p < HOLD_TAP_TUNING_PARAM_COUNT; p++) {
+        char key[24];
+        hold_tap_tuning_settings_key(key, sizeof(key), id, p);
+        settings_delete(key);
+    }
+    return 0;
+}
+
+// settings_load() callback. name is the part after the subtree, "<id>/<param>".
+static int hold_tap_tuning_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                        void *cb_arg) {
+    const char *slash = strchr(name, '/');
+    if (!slash) {
+        return -ENOENT;
+    }
+    uint32_t id = (uint32_t)strtoul(name, NULL, 10);
+    uint32_t param = (uint32_t)strtoul(slash + 1, NULL, 10);
+
+    int32_t value;
+    if (len != sizeof(value)) {
+        return -EINVAL;
+    }
+    ssize_t rc = read_cb(cb_arg, &value, sizeof(value));
+    if (rc < 0) {
+        return (int)rc;
+    }
+    // Re-apply into RAM (no re-save: this is the load path).
+    hold_tap_tuning_set_param(id, (enum hold_tap_tuning_param)param, value);
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(hold_tap_tuning, HOLD_TAP_TUNING_SETTINGS_SUBTREE, NULL,
+                               hold_tap_tuning_settings_set, NULL, NULL);
+
+#endif /* CONFIG_PYURON_TIMING_STUDIO_RPC */
 
 #endif /* DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) */

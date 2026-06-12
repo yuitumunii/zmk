@@ -133,6 +133,16 @@ if (CONFIG_ZMK_STUDIO_RPC)
   target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
   target_sources(app PRIVATE ${proto_srcs} ${proto_hdrs})
 
+  # Custom "pyuron_timing" subsystem proto (live &mt/&lt timing tuning). Generated
+  # with RELPATH = app/proto so the header resolves as <pyuron/timing/timing.pb.h>
+  # (CMAKE_CURRENT_BINARY_DIR is already on the include path above).
+  if (CONFIG_PYURON_TIMING_STUDIO_RPC)
+    nanopb_generate_cpp(timing_proto_srcs timing_proto_hdrs
+                          RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                          ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/timing/timing.proto)
+    target_sources(app PRIVATE ${timing_proto_srcs} ${timing_proto_hdrs})
+  endif()
+
   add_subdirectory(src/studio)
 endif()
 

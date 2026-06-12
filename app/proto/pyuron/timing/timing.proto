@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package pyuron.timing;
+
+// Which runtime-tunable parameter of a hold-tap (&mt / &lt) instance to change.
+// Values MUST stay in sync with enum hold_tap_tuning_param in
+// include/zmk/behaviors/hold_tap_tuning.h.
+enum Param {
+    PARAM_TAPPING_TERM_MS = 0; // hold-vs-tap decision window
+    PARAM_QUICK_TAP_MS = 1;    // re-tap window after a tap (may be -1 = disabled)
+    PARAM_FLAVOR = 2;          // 0=hold-preferred 1=balanced 2=tap-preferred 3=tap-unless-interrupted
+}
+
+// Snapshot of one hold-tap behavior instance.
+message HoldTapInfo {
+    uint32 id = 1;             // index into the firmware's hold-tap array
+    string name = 2;          // devicetree node name, e.g. "mt" / "lt"
+    uint32 tapping_term_ms = 3;
+    int32 quick_tap_ms = 4;   // signed: -1 means "disabled"
+    uint32 flavor = 5;        // 0..3
+}
+
+// Each response carries at most ONE HoldTapInfo so it stays well under the
+// Studio RPC TX buffer. The app probes get_count then get(0..count-1) rather
+// than receiving a list, avoiding async notifications entirely.
+
+message GetCountRequest {}
+message GetCountResponse { uint32 count = 1; }
+
+message GetRequest { uint32 id = 1; }
+message GetResponse { HoldTapInfo info = 1; }
+
+message SetParamRequest {
+    uint32 id = 1;
+    Param param = 2;
+    int32 value = 3;
+}
+message SetParamResponse { HoldTapInfo info = 1; } // echoes applied state
+
+message ResetRequest { uint32 id = 1; } // restore devicetree defaults
+message ResetResponse { HoldTapInfo info = 1; }
+
+message Request {
+    oneof request_type {
+        GetCountRequest get_count = 1;
+        GetRequest get = 2;
+        SetParamRequest set_param = 3;
+        ResetRequest reset = 4;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        GetCountResponse get_count = 2;
+        GetResponse get = 3;
+        SetParamResponse set_param = 4;
+        ResetResponse reset = 5;
+    }
+}

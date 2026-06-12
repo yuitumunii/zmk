@@ -135,6 +135,15 @@ config ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES
       payload capacity follows the configured RPC RX buffer size unless explicitly
       overridden.
 
+config PYURON_TIMING_STUDIO_RPC
+    bool "Pyuron live hold-tap (&mt/&lt) timing tuning (custom RPC)"
+    default n
+    help
+      Custom Studio RPC subsystem (pyuron_timing) that live-tunes each hold-tap
+      instance's tapping-term-ms / quick-tap-ms / flavor from the desktop app,
+      without reflashing, and persists the values to NVS. Requires the
+      custom-studio-protocol RPC base.
+
 endif
 
 endif

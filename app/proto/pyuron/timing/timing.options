@@ -1,0 +1,4 @@
+# Nanopb options for timing.proto — fixed sizes so messages are statically
+# sized (no malloc, no callbacks). name holds the devicetree node name.
+pyuron.timing.HoldTapInfo.name        max_size:24
+pyuron.timing.ErrorResponse.message   max_size:48
