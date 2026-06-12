@@ -34,6 +34,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
+#include <zmk/split/cpi_forward.h>
+#endif
 
 #include "relay_event.h"
 
@@ -61,6 +64,9 @@ struct peripheral_slot {
     struct zmk_split_relay_event_chunk_reassembly_state relay_event_chunk_reassembly_state;
 #endif
     uint16_t run_behavior_handle;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
+    uint16_t cpi_forward_handle;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     struct bt_gatt_subscribe_params batt_lvl_subscribe_params;
     struct bt_gatt_discover_params batt_lvl_sub_discover_params;
@@ -226,6 +232,9 @@ int release_peripheral_slot(int index) {
     slot->subscribe_params.value_handle = 0;
     slot->run_behavior_handle = 0;
     slot->selected_physical_layout_handle = 0;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
+    slot->cpi_forward_handle = 0;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
     memset(&slot->relay_event_subscribe_params, 0, sizeof(slot->relay_event_subscribe_params));
     memset(&slot->relay_event_sub_discover_params, 0,
@@ -846,6 +855,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             LOG_DBG("Found select physical layout handle");
             slot->selected_physical_layout_handle = bt_gatt_attr_value_handle(attr);
             k_work_submit(&update_peripherals_selected_layouts_work);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
+        } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
+                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CPI_FORWARD_UUID))) {
+            LOG_DBG("Found CPI forward handle");
+            slot->cpi_forward_handle = bt_gatt_attr_value_handle(attr);
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_HID_INDICATORS_UUID))) {
@@ -1524,3 +1539,41 @@ void peripheral_event_work_callback(struct k_work *work) {
         zmk_split_transport_central_peripheral_event_handler(&bt_central, ev.source, ev.event);
     }
 }
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)
+
+struct zmk_split_cpi_fwd_payload {
+    uint8_t sensor_id;
+    uint16_t cpi; // little-endian on the wire
+} __packed;
+
+int zmk_split_bt_cpi_forward(uint8_t peripheral_idx, uint8_t sensor_id, uint16_t cpi) {
+    if (peripheral_idx >= ZMK_SPLIT_BLE_PERIPHERAL_COUNT) {
+        return -EINVAL;
+    }
+
+    struct peripheral_slot *slot = &peripherals[peripheral_idx];
+
+    if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
+        return -ENOTCONN;
+    }
+
+    if (slot->cpi_forward_handle == 0) {
+        return -EAGAIN;
+    }
+
+    struct zmk_split_cpi_fwd_payload payload = {
+        .sensor_id = sensor_id,
+        .cpi = sys_cpu_to_le16(cpi),
+    };
+
+    int err = bt_gatt_write_without_response(slot->conn, slot->cpi_forward_handle,
+                                             &payload, sizeof(payload), false);
+    if (err < 0) {
+        LOG_ERR("CPI forward write failed (peripheral=%u sensor=%u cpi=%u err=%d)",
+                peripheral_idx, sensor_id, cpi, err);
+    }
+    return err;
+}
+
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD)

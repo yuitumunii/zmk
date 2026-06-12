@@ -252,6 +252,50 @@ ssize_t bt_gatt_attr_read_input_split_cpf(struct bt_conn *conn, const struct bt_
 
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_CPI_FORWARD)
+
+// Payload written by the central: | sensor_id:u8 | cpi_lo:u8 | cpi_hi:u8 |
+struct zmk_split_cpi_forward_payload {
+    uint8_t sensor_id;
+    uint16_t cpi; // little-endian
+} __packed;
+
+// Weak implementation — returns -ENOTSUP unless a module (e.g. zmk-pmw3610-driver
+// with CONFIG_PMW3610_ALT_SPLIT_CPI_PERIPHERAL=y) provides the strong override.
+int __attribute__((weak)) zmk_split_peripheral_cpi_apply(uint8_t sensor_id, uint16_t cpi) {
+    return -ENOTSUP;
+}
+
+static void cpi_forward_work_cb(struct k_work *work);
+static K_WORK_DEFINE(cpi_forward_work, cpi_forward_work_cb);
+static uint8_t cpi_fwd_sensor_id;
+static uint16_t cpi_fwd_cpi;
+
+static void cpi_forward_work_cb(struct k_work *work) {
+    ARG_UNUSED(work);
+    int ret = zmk_split_peripheral_cpi_apply(cpi_fwd_sensor_id, cpi_fwd_cpi);
+    if (ret < 0) {
+        LOG_WRN("zmk_split_peripheral_cpi_apply(%u, %u) failed: %d",
+                cpi_fwd_sensor_id, cpi_fwd_cpi, ret);
+    }
+}
+
+static ssize_t split_svc_cpi_forward(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                     const void *buf, uint16_t len, uint16_t offset,
+                                     uint8_t flags) {
+    if (offset != 0 || len != sizeof(struct zmk_split_cpi_forward_payload)) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+    const struct zmk_split_cpi_forward_payload *p =
+        (const struct zmk_split_cpi_forward_payload *)buf;
+    cpi_fwd_sensor_id = p->sensor_id;
+    cpi_fwd_cpi = sys_le16_to_cpu(p->cpi);
+    k_work_submit(&cpi_forward_work);
+    return (ssize_t)len;
+}
+
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_CPI_FORWARD)
+
 BT_GATT_SERVICE_DEFINE(
     split_svc, BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_SERVICE_UUID)),
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CHAR_POSITION_STATE_UUID),
@@ -286,7 +330,13 @@ BT_GATT_SERVICE_DEFINE(
                            BT_GATT_CHRC_WRITE | BT_GATT_CHRC_READ,
                            BT_GATT_PERM_WRITE_ENCRYPT | BT_GATT_PERM_READ_ENCRYPT,
                            split_svc_get_selected_phys_layout, split_svc_select_phys_layout,
-                           NULL), );
+                           NULL),
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_CPI_FORWARD)
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CPI_FORWARD_UUID),
+                           BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT,
+                           NULL, split_svc_cpi_forward, NULL),
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_CPI_FORWARD)
+    );
 
 K_THREAD_STACK_DEFINE(service_q_stack, CONFIG_ZMK_SPLIT_BLE_PERIPHERAL_STACK_SIZE);
 
