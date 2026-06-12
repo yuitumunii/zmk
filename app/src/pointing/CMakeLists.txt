@@ -18,14 +18,12 @@ if(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
     set(NANOPB_GENERATE_CPP_APPEND_PATH TRUE)
     set(NANOPB_GENERATE_CPP_STANDALONE OFF)
 
-    zephyr_library()
     file(GLOB_RECURSE AML_PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/aml/*.proto)
     nanopb_generate_cpp(aml_proto_srcs aml_proto_hdrs
                         RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
                         ${AML_PROTO_FILES})
-    target_include_directories(${ZEPHYR_CURRENT_LIBRARY} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-    target_sources(${ZEPHYR_CURRENT_LIBRARY} PRIVATE ${aml_proto_srcs} ${aml_proto_hdrs})
-
+    # Generated .pb.c must be compiled into app (not a separate library) so
+    # the linker can resolve pyuron_aml_Request_msg / Response_msg symbols.
+    target_sources(app PRIVATE ${aml_proto_srcs})
     target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-    add_dependencies(app ${ZEPHYR_CURRENT_LIBRARY})
 endif()
