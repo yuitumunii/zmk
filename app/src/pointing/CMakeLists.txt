@@ -42,7 +42,9 @@ endif()
 if(CONFIG_PYURON_SCROLL_STUDIO_RPC)
     target_sources(app PRIVATE scroll_studio.c)
 
-    zephyr_library()
+    # Named library to avoid colliding with the dir-named zephyr_library()
+    # created by the AML block above (both live in this same CMake dir).
+    zephyr_library_named(pyuron_scroll_proto)
     set(SCROLL_PROTO_LIB ${ZEPHYR_CURRENT_LIBRARY})
 
     file(GLOB_RECURSE SCROLL_PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/scroll/*.proto)
