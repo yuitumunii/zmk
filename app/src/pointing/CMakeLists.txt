@@ -18,12 +18,20 @@ if(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
     set(NANOPB_GENERATE_CPP_APPEND_PATH TRUE)
     set(NANOPB_GENERATE_CPP_STANDALONE OFF)
 
+    # Build the generated proto into its own library.  zephyr_library() must be
+    # in the same CMake directory scope as nanopb_generate_cpp so that CMake sees
+    # the GENERATED property on .pb.c.  Then target_link_libraries (not
+    # add_dependencies) actually links the symbols into app.
+    zephyr_library()
+    set(AML_PROTO_LIB ${ZEPHYR_CURRENT_LIBRARY})
+
     file(GLOB_RECURSE AML_PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/aml/*.proto)
     nanopb_generate_cpp(aml_proto_srcs aml_proto_hdrs
                         RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
                         ${AML_PROTO_FILES})
-    # Generated .pb.c must be compiled into app (not a separate library) so
-    # the linker can resolve pyuron_aml_Request_msg / Response_msg symbols.
-    target_sources(app PRIVATE ${aml_proto_srcs})
+    target_include_directories(${AML_PROTO_LIB} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+    target_sources(${AML_PROTO_LIB} PRIVATE ${aml_proto_srcs} ${aml_proto_hdrs})
+
     target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(app PRIVATE ${AML_PROTO_LIB})
 endif()
