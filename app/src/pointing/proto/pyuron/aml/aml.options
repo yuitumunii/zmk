@@ -1,0 +1,8 @@
+# nanopb size constraints for AML messages.
+# These must be set so the generated code uses fixed-size arrays (no heap).
+
+# Max error message length (64 bytes is plenty for short C error strings).
+pyuron.aml.ErrorResponse.message max_size:64
+
+# Max number of excluded key positions (16 is more than enough for Pyuron).
+pyuron.aml.AmlConfig.excluded_positions max_count:16

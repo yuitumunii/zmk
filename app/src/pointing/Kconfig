@@ -45,6 +45,16 @@ config ZMK_INPUT_PROCESSOR_TEMP_LAYER_MAX_ACTION_EVENTS
     default 4
     depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER
 
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
+    bool "AML Studio RPC (live config via ZMK Studio)"
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER
+    select SETTINGS
+    help
+      Expose AutoMouse Layer config (deactivation timeout, prior-idle guard,
+      excluded key positions) via a custom Studio RPC subsystem "pyuron_aml".
+      Requires the ZMK fork with custom-studio-protocol support.
+      Changes are persisted to NVS and survive reboot.
+
 endif
 
 config ZMK_INPUT_PROCESSOR_TRANSFORM
