@@ -16,6 +16,11 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+#include <zephyr/settings/settings.h>
+#include <zmk/pointing/aml.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Constants and Types */
@@ -42,29 +47,169 @@ struct temp_layer_data {
 /* Static Work Queue Items */
 static struct k_work_delayable layer_disable_works[MAX_LAYERS];
 
-/* Position Search */
+/* ---- AML runtime (RAM-ified config for live Studio RPC tuning) ----------- */
+/* Only compiled when the Studio RPC is enabled. The hot-paths always use     */
+/* these values so the behaviour is consistent whether RPC is present or not. */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+
+#define AML_SETTINGS_SUBTREE "aml"
+#define AML_MAX_EXCLUDED 16
+
+static struct {
+    /* Runtime values (live-changeable) */
+    uint32_t deactivation_ms;        /* 0 = use binding param2 until first call */
+    uint32_t prior_idle_ms;
+    uint16_t excluded_positions[AML_MAX_EXCLUDED];
+    uint8_t  num_excluded;
+    /* Devicetree defaults (for reset) */
+    uint32_t default_deactivation_ms;  /* captured on first temp_layer_handle_event call */
+    uint32_t default_prior_idle_ms;
+    uint16_t default_excluded[AML_MAX_EXCLUDED];
+    uint8_t  default_num_excluded;
+    bool     defaults_captured;
+} aml_rt;
+
+/* ---- Public AML API (used by aml_studio.c) ------------------------------- */
+
+int zmk_aml_get(struct zmk_aml_config *out) {
+    out->deactivation_ms = aml_rt.deactivation_ms;
+    out->prior_idle_ms   = aml_rt.prior_idle_ms;
+    out->num_excluded    = aml_rt.num_excluded;
+    memcpy(out->excluded_positions, aml_rt.excluded_positions,
+           aml_rt.num_excluded * sizeof(uint16_t));
+    return 0;
+}
+
+int zmk_aml_set_deactivation(uint32_t ms) {
+    aml_rt.deactivation_ms = ms;
+    return 0;
+}
+
+int zmk_aml_set_prior_idle(uint32_t ms) {
+    aml_rt.prior_idle_ms = ms;
+    return 0;
+}
+
+int zmk_aml_toggle_excluded(uint32_t position) {
+    /* Search for existing entry */
+    for (uint8_t i = 0; i < aml_rt.num_excluded; i++) {
+        if (aml_rt.excluded_positions[i] == (uint16_t)position) {
+            /* Remove: shift left */
+            memmove(&aml_rt.excluded_positions[i],
+                    &aml_rt.excluded_positions[i + 1],
+                    (aml_rt.num_excluded - i - 1) * sizeof(uint16_t));
+            aml_rt.num_excluded--;
+            return 0;
+        }
+    }
+    /* Not found: add (if there's room) */
+    if (aml_rt.num_excluded >= AML_MAX_EXCLUDED) {
+        return -ENOMEM;
+    }
+    aml_rt.excluded_positions[aml_rt.num_excluded++] = (uint16_t)position;
+    return 0;
+}
+
+int zmk_aml_reset(void) {
+    aml_rt.deactivation_ms = aml_rt.default_deactivation_ms;
+    aml_rt.prior_idle_ms   = aml_rt.default_prior_idle_ms;
+    aml_rt.num_excluded    = aml_rt.default_num_excluded;
+    memcpy(aml_rt.excluded_positions, aml_rt.default_excluded,
+           aml_rt.default_num_excluded * sizeof(uint16_t));
+    /* Drop NVS overrides so defaults persist across reboot */
+    settings_delete(AML_SETTINGS_SUBTREE "/dec");
+    settings_delete(AML_SETTINGS_SUBTREE "/idle");
+    settings_delete(AML_SETTINGS_SUBTREE "/excl");
+    return 0;
+}
+
+int zmk_aml_save(void) {
+    int rc;
+    rc = settings_save_one(AML_SETTINGS_SUBTREE "/dec",
+                           &aml_rt.deactivation_ms, sizeof(aml_rt.deactivation_ms));
+    if (rc < 0) return rc;
+    rc = settings_save_one(AML_SETTINGS_SUBTREE "/idle",
+                           &aml_rt.prior_idle_ms, sizeof(aml_rt.prior_idle_ms));
+    if (rc < 0) return rc;
+    /* Pack excluded: [num_excluded, pos0, pos1, ...] */
+    uint8_t excl_buf[1 + AML_MAX_EXCLUDED * 2];
+    excl_buf[0] = aml_rt.num_excluded;
+    memcpy(excl_buf + 1, aml_rt.excluded_positions,
+           aml_rt.num_excluded * sizeof(uint16_t));
+    rc = settings_save_one(AML_SETTINGS_SUBTREE "/excl",
+                           excl_buf, 1 + aml_rt.num_excluded * 2);
+    return rc;
+}
+
+/* ---- NVS settings loader ------------------------------------------------- */
+
+static int aml_settings_set(const char *name, size_t len,
+                             settings_read_cb read_cb, void *cb_arg) {
+    if (strcmp(name, "dec") == 0) {
+        if (len != sizeof(uint32_t)) return -EINVAL;
+        uint32_t v;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        aml_rt.deactivation_ms = v;
+    } else if (strcmp(name, "idle") == 0) {
+        if (len != sizeof(uint32_t)) return -EINVAL;
+        uint32_t v;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        aml_rt.prior_idle_ms = v;
+    } else if (strcmp(name, "excl") == 0 && len >= 1) {
+        uint8_t excl_buf[1 + AML_MAX_EXCLUDED * 2];
+        ssize_t rc = read_cb(cb_arg, excl_buf, MIN(len, sizeof(excl_buf)));
+        if (rc < 0) return (int)rc;
+        uint8_t n = MIN(excl_buf[0], AML_MAX_EXCLUDED);
+        aml_rt.num_excluded = n;
+        memcpy(aml_rt.excluded_positions, excl_buf + 1, n * sizeof(uint16_t));
+    }
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(pyuron_aml, AML_SETTINGS_SUBTREE, NULL,
+                               aml_settings_set, NULL, NULL);
+
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC */
+
+/* ---- Position Search ----------------------------------------------------- */
+
 static bool position_is_excluded(const struct temp_layer_config *config, uint32_t position) {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+    /* Use RAM runtime list (may differ from devicetree config after live edit) */
+    if (!aml_rt.num_excluded) return false;
+    for (uint8_t i = 0; i < aml_rt.num_excluded; i++) {
+        if (aml_rt.excluded_positions[i] == (uint16_t)position) return true;
+    }
+    return false;
+#else
     if (!config->excluded_positions || !config->num_positions) {
         return false;
     }
-
     const uint16_t *end = config->excluded_positions + config->num_positions;
     for (const uint16_t *pos = config->excluded_positions; pos < end; pos++) {
-        if (*pos == position) {
-            return true;
-        }
+        if (*pos == position) return true;
     }
-
     return false;
+#endif
 }
 
-/* Timing Check */
+/* ---- Timing Check -------------------------------------------------------- */
+
 static bool should_quick_tap(const struct temp_layer_config *config, int64_t last_tapped,
                              int64_t current_time) {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+    int64_t idle_ms = (int64_t)aml_rt.prior_idle_ms;
+    return (last_tapped + idle_ms) > current_time;
+#else
     return (last_tapped + config->require_prior_idle_ms) > current_time;
+#endif
 }
 
-/* Layer State Management */
+/* ---- Layer State Management ---------------------------------------------- */
+
 static void update_layer_state(struct temp_layer_state *state, bool activate) {
     if (state->is_active == activate) {
         return;
@@ -116,7 +261,8 @@ static void layer_action_work_cb(struct k_work *work) {
 
 static K_WORK_DEFINE(layer_action_work, layer_action_work_cb);
 
-/* Work Queue Callback */
+/* ---- Work Queue Callback ------------------------------------------------- */
+
 static void layer_disable_callback(struct k_work *work) {
     struct k_work_delayable *d_work = k_work_delayable_from_work(work);
     int layer_index = ARRAY_INDEX(layer_disable_works, d_work);
@@ -127,7 +273,8 @@ static void layer_disable_callback(struct k_work *work) {
     k_work_submit(&layer_action_work);
 }
 
-/* Event Handlers */
+/* ---- Event Handlers ------------------------------------------------------ */
+
 static int handle_layer_state_changed(const struct device *dev, const zmk_event_t *eh) {
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
     int ret = k_mutex_lock(&data->lock, K_FOREVER);
@@ -161,7 +308,7 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
 
     const struct temp_layer_config *cfg = dev->config;
 
-    if (data->state.is_active && cfg->excluded_positions && cfg->num_positions > 0) {
+    if (data->state.is_active) {
         if (!position_is_excluded(cfg, ev->position)) {
             LOG_DBG("Position not excluded, deactivating layer");
             update_layer_state(&data->state, false);
@@ -227,7 +374,8 @@ static int handle_event_dispatcher(const zmk_event_t *eh) {
     return 0;
 }
 
-/* Driver Implementation */
+/* ---- Driver Implementation ----------------------------------------------- */
+
 static int temp_layer_handle_event(const struct device *dev, struct input_event *event,
                                    uint32_t param1, uint32_t param2,
                                    struct zmk_input_processor_state *state) {
@@ -247,6 +395,23 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 
     data->state.toggle_layer = param1;
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+    /* Capture the binding's param2 as the deactivation default on first call.
+     * This is the only place we see param2, so do it here before any NVS
+     * override may already be in aml_rt.deactivation_ms. */
+    if (!aml_rt.defaults_captured && param2 > 0) {
+        aml_rt.default_deactivation_ms = param2;
+        if (aml_rt.deactivation_ms == 0) {
+            /* No NVS override loaded yet — seed with the devicetree value */
+            aml_rt.deactivation_ms = param2;
+        }
+        aml_rt.defaults_captured = true;
+    }
+    uint32_t timeout_ms = aml_rt.deactivation_ms;
+#else
+    uint32_t timeout_ms = param2;
+#endif
+
     if (!data->state.is_active &&
         !should_quick_tap(cfg, data->state.last_tapped_timestamp, k_uptime_get())) {
         struct layer_state_action action = {.layer = param1, .activate = true};
@@ -259,8 +424,8 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
         }
     }
 
-    if (param2 > 0) {
-        k_work_reschedule(&layer_disable_works[param1], K_MSEC(param2));
+    if (timeout_ms > 0) {
+        k_work_reschedule(&layer_disable_works[param1], K_MSEC(timeout_ms));
     }
 
     k_mutex_unlock(&data->lock);
@@ -276,32 +441,61 @@ static int temp_layer_init(const struct device *dev) {
         k_work_init_delayable(&layer_disable_works[i], layer_disable_callback);
     }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+    /* Seed RAM config from devicetree (before NVS settings_load() runs) */
+    const struct temp_layer_config *cfg = dev->config;
+    aml_rt.prior_idle_ms         = (uint32_t)cfg->require_prior_idle_ms;
+    aml_rt.default_prior_idle_ms = (uint32_t)cfg->require_prior_idle_ms;
+    uint8_t n = (uint8_t)MIN(cfg->num_positions, AML_MAX_EXCLUDED);
+    aml_rt.num_excluded         = n;
+    aml_rt.default_num_excluded = n;
+    for (uint8_t i = 0; i < n; i++) {
+        aml_rt.excluded_positions[i] = cfg->excluded_positions[i];
+        aml_rt.default_excluded[i]   = cfg->excluded_positions[i];
+    }
+    /* deactivation_ms defaults captured on first handle_event (see param2 comment) */
+#endif
+
     return 0;
 }
 
-/* Driver API */
+/* ---- Driver API ---------------------------------------------------------- */
+
 static const struct zmk_input_processor_driver_api temp_layer_driver_api = {
     .handle_event = temp_layer_handle_event,
 };
 
-/* Event Listeners Conditions */
+/* ---- Event Listeners Conditions ------------------------------------------ */
+
 #define NEEDS_POSITION_HANDLERS(n, ...) DT_INST_PROP_HAS_IDX(n, excluded_positions, 0)
 #define NEEDS_KEYCODE_HANDLERS(n, ...) (DT_INST_PROP_OR(n, require_prior_idle_ms, 0) > 0)
 
-/* Event Handlers Registration */
+/* Always register position + keycode handlers when RPC is enabled,
+ * because runtime config may add excluded positions or a prior-idle guard
+ * even if the devicetree node doesn't have them. */
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+#define NEEDS_POSITION_HANDLERS_OVERRIDE 1
+#define NEEDS_KEYCODE_HANDLERS_OVERRIDE  1
+#else
+#define NEEDS_POSITION_HANDLERS_OVERRIDE 0
+#define NEEDS_KEYCODE_HANDLERS_OVERRIDE  0
+#endif
+
+/* ---- Event Handlers Registration ----------------------------------------- */
+
 ZMK_LISTENER(processor_temp_layer, handle_event_dispatcher);
 ZMK_SUBSCRIPTION(processor_temp_layer, zmk_layer_state_changed);
 
-/* Individual Subscriptions */
-#if DT_INST_FOREACH_STATUS_OKAY_VARGS(NEEDS_POSITION_HANDLERS, ||)
+#if NEEDS_POSITION_HANDLERS_OVERRIDE || DT_INST_FOREACH_STATUS_OKAY_VARGS(NEEDS_POSITION_HANDLERS, ||)
 ZMK_SUBSCRIPTION(processor_temp_layer, zmk_position_state_changed);
 #endif
 
-#if DT_INST_FOREACH_STATUS_OKAY_VARGS(NEEDS_KEYCODE_HANDLERS, ||)
+#if NEEDS_KEYCODE_HANDLERS_OVERRIDE || DT_INST_FOREACH_STATUS_OKAY_VARGS(NEEDS_KEYCODE_HANDLERS, ||)
 ZMK_SUBSCRIPTION(processor_temp_layer, zmk_keycode_state_changed);
 #endif
 
-/* Device Instantiation */
+/* ---- Device Instantiation ------------------------------------------------ */
+
 #define TEMP_LAYER_INST(n)                                                                         \
     static struct temp_layer_data processor_temp_layer_data_##n = {};                              \
     static const uint16_t excluded_positions_##n[] = DT_INST_PROP(n, excluded_positions);          \
