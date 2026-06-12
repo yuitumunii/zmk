@@ -74,9 +74,28 @@ config ZMK_SPLIT_BLE_PREF_TIMEOUT
     int "Supervision timeout to use for split central/peripheral connection"
     default 400
 
+config ZMK_SPLIT_BLE_CENTRAL_CPI_FORWARD
+    bool "Central: forward CPI changes to peripheral trackball sensors"
+    default n
+    help
+      When enabled the central discovers the CPI-forward write characteristic
+      on each peripheral and exposes zmk_split_bt_cpi_forward() so modules
+      (e.g. zmk-pmw3610-driver) can propagate live CPI changes to sensors
+      that physically live on the peripheral half.
+
 endif # ZMK_SPLIT_ROLE_CENTRAL
 
 if !ZMK_SPLIT_ROLE_CENTRAL
+
+config ZMK_SPLIT_PERIPHERAL_CPI_FORWARD
+    bool "Peripheral: accept CPI-forward write commands from central"
+    default n
+    help
+      When enabled the peripheral exposes a write-without-response GATT
+      characteristic (ZMK_SPLIT_BT_CPI_FORWARD_UUID) so the central can
+      change the CPI of a sensor that lives here.  Modules must provide a
+      strong override of zmk_split_peripheral_cpi_apply() to act on the
+      write; the default weak implementation returns -ENOTSUP.
 
 config ZMK_SPLIT_BLE_PERIPHERAL_STACK_SIZE
     int "BLE split peripheral notify thread stack size"
