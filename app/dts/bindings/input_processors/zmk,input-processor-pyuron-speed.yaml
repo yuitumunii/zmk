@@ -1,0 +1,14 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: >
+  Pyuron trackball speed multiplier.
+  Scales INPUT_REL_X / INPUT_REL_Y by a runtime percentage (100 = x1.0) with
+  sub-step remainder accumulation, giving smooth cursor-speed control between
+  the sensor's coarse 200-CPI hardware steps. Adjust live via the
+  "pyuron_speed" custom Studio RPC (requires CONFIG_PYURON_SPEED_STUDIO_RPC=y);
+  persisted to NVS. All other input codes pass through unchanged.
+
+compatible: "zmk,input-processor-pyuron-speed"
+
+include: ip_zero_param.yaml
