@@ -1,0 +1,2 @@
+# nanopb size constraints for speed.proto.
+pyuron.speed.ErrorResponse.message max_size:64
