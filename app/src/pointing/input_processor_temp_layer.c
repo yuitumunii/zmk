@@ -312,9 +312,23 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
         if (!position_is_excluded(cfg, ev->position)) {
             LOG_DBG("Position not excluded, deactivating layer");
             update_layer_state(&data->state, false);
+        } else {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+            /* Excluded key pressed while AML is active: extend the dwell timer
+             * from now, so actively clicking (e.g. K / left-click) keeps the
+             * mouse layer alive just like trackball motion does. Reuses the
+             * same deactivation (dwell) value. */
+            uint32_t timeout_ms = aml_rt.deactivation_ms;
+            if (timeout_ms > 0) {
+                k_work_reschedule(&layer_disable_works[data->state.toggle_layer],
+                                  K_MSEC(timeout_ms));
+                LOG_DBG("Excluded position, extending AML dwell by %u ms", timeout_ms);
+            }
+#else
+            LOG_DBG("Position excluded, continuing");
+#endif
         }
     }
-    LOG_DBG("Position excluded, continuing");
 
     k_mutex_unlock(&data->lock);
 
