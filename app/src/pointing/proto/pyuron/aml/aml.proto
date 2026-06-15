@@ -8,6 +8,7 @@ message AmlConfig {
     uint32 deactivation_ms = 1;          // ms after last motion before AML exits
     uint32 prior_idle_ms = 2;            // ms idle required before AML activates
     repeated uint32 excluded_positions = 3; // key positions that don't exit AML
+    uint32 extend_ms = 4;                // re-arm amount when an excluded key is pressed
 }
 
 message GetRequest {}
@@ -15,6 +16,7 @@ message SetDeactivationRequest { uint32 ms = 1; }
 message SetPriorIdleRequest    { uint32 ms = 1; }
 message ToggleExcludedRequest  { uint32 position = 1; }
 message ResetRequest           {}
+message SetExtendRequest       { uint32 ms = 1; }
 
 message Request {
     oneof request_type {
@@ -23,6 +25,7 @@ message Request {
         SetPriorIdleRequest    set_prior_idle   = 3;
         ToggleExcludedRequest  toggle_excluded  = 4;
         ResetRequest           reset            = 5;
+        SetExtendRequest       set_extend       = 6;
     }
 }
 
