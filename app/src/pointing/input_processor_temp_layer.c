@@ -230,15 +230,17 @@ static bool should_quick_tap(const struct temp_layer_config *config, int64_t las
 /* ---- Layer State Management ---------------------------------------------- */
 
 static void update_layer_state(struct temp_layer_state *state, bool activate) {
-    if (state->is_active == activate) {
-        return;
-    }
-
+    /* is_active は handle_event 側で AML 予約時に即セットされることがあるため、
+     * 早期 return せず、実レイヤー状態を基準に activate/deactivate を冪等に行う。
+     * これにより「AML に入った直後の窓で除外キーを押すと延長(extend)が効かない」
+     * race を解消する(is_active を先に立ててもレイヤー有効化が二重/欠落しない)。 */
     state->is_active = activate;
-    if (activate) {
+    bool layer_on =
+        zmk_keymap_layer_active(zmk_keymap_layer_index_to_id(state->toggle_layer));
+    if (activate && !layer_on) {
         zmk_keymap_layer_activate(state->toggle_layer, false);
         LOG_DBG("Layer %d activated", state->toggle_layer);
-    } else {
+    } else if (!activate && layer_on) {
         zmk_keymap_layer_deactivate(state->toggle_layer, false);
         LOG_DBG("Layer %d deactivated", state->toggle_layer);
     }
@@ -453,11 +455,17 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 
     if (!data->state.is_active &&
         !should_quick_tap(cfg, data->state.last_tapped_timestamp, k_uptime_get())) {
+        /* is_active を予約時に即セットする。こうしないと activate が work queue
+         * 経由で遅れて反映されるまでの窓で除外キーを押しても is_active==false で
+         * 延長(extend)分岐に入れず、AML 延長が効かない。実際のレイヤー有効化は
+         * 従来どおり work queue 経由(update_layer_state を冪等化済み)。 */
+        data->state.is_active = true;
         struct layer_state_action action = {.layer = param1, .activate = true};
 
         int ret = k_msgq_put(&temp_layer_action_msgq, &action, K_MSEC(10));
         if (ret < 0) {
             LOG_ERR("Failed to enqueue action to enable layer %d (%d)", param1, ret);
+            data->state.is_active = false;
         } else {
             k_work_submit(&layer_action_work);
         }
