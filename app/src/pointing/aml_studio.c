@@ -38,6 +38,7 @@ static void fill_config_response(pyuron_aml_Response *resp) {
     cr->has_config = true;
     cr->config.deactivation_ms = cfg.deactivation_ms;
     cr->config.prior_idle_ms   = cfg.prior_idle_ms;
+    cr->config.extend_ms       = cfg.extend_ms;
     cr->config.excluded_positions_count = cfg.num_excluded;
     for (uint8_t i = 0; i < cfg.num_excluded && i < ZMK_AML_MAX_EXCLUDED; i++) {
         cr->config.excluded_positions[i] = cfg.excluded_positions[i];
@@ -71,6 +72,10 @@ static bool aml_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
         break;
     case pyuron_aml_Request_set_prior_idle_tag:
         rc = zmk_aml_set_prior_idle(req.request_type.set_prior_idle.ms);
+        if (rc == 0) { zmk_aml_save(); }
+        break;
+    case pyuron_aml_Request_set_extend_tag:
+        rc = zmk_aml_set_extend(req.request_type.set_extend.ms);
         if (rc == 0) { zmk_aml_save(); }
         break;
     case pyuron_aml_Request_toggle_excluded_tag:
