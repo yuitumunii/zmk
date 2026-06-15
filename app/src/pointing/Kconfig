@@ -71,6 +71,21 @@ config PYURON_SCROLL_STUDIO_RPC
       Requires the ZMK fork with custom-studio-protocol support.
       Changes are persisted to NVS and survive reboot.
 
+config ZMK_INPUT_PROCESSOR_PYURON_SPEED
+    bool "Pyuron trackball speed-multiplier input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_PYURON_SPEED_ENABLED
+
+config PYURON_SPEED_STUDIO_RPC
+    bool "Pyuron trackball speed Studio RPC (live % adjust via ZMK Studio)"
+    depends on ZMK_INPUT_PROCESSOR_PYURON_SPEED
+    select SETTINGS
+    help
+      Expose the trackball cursor speed multiplier (percent, 100 = x1.0) via a
+      custom Studio RPC subsystem "pyuron_speed".  Gives smooth cursor-speed
+      control between the sensor's coarse 200-CPI hardware steps, without
+      reflashing.  Changes are persisted to NVS and survive reboot.
+
 endif
 
 config ZMK_INPUT_PROCESSOR_TRANSFORM
