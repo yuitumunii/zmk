@@ -16,6 +16,7 @@
 struct zmk_aml_config {
     uint32_t deactivation_ms;
     uint32_t prior_idle_ms;
+    uint32_t extend_ms;       /* re-arm amount when an excluded key is pressed in AML */
     uint16_t excluded_positions[ZMK_AML_MAX_EXCLUDED];
     uint8_t  num_excluded;
 };
@@ -23,6 +24,7 @@ struct zmk_aml_config {
 int zmk_aml_get(struct zmk_aml_config *out);
 int zmk_aml_set_deactivation(uint32_t ms);
 int zmk_aml_set_prior_idle(uint32_t ms);
+int zmk_aml_set_extend(uint32_t ms);
 int zmk_aml_toggle_excluded(uint32_t position);
 int zmk_aml_reset(void);
 int zmk_aml_save(void);
