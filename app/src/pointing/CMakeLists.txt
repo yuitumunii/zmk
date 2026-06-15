@@ -5,13 +5,14 @@ target_sources_ifdef(CONFIG_ZMK_INPUT_LISTENER app PRIVATE input_listener.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_TRANSFORM app PRIVATE input_processor_transform.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_SCALER app PRIVATE input_processor_scaler.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_PYURON_SCROLL_INVERT app PRIVATE input_processor_pyuron_scroll_invert.c)
+target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_PYURON_SPEED app PRIVATE input_processor_pyuron_speed.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER app PRIVATE input_processor_temp_layer.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_CODE_MAPPER app PRIVATE input_processor_code_mapper.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_BEHAVIORS app PRIVATE input_processor_behaviors.c)
 target_sources_ifdef(CONFIG_ZMK_POINTING_SMOOTH_SCROLLING app PRIVATE resolution_multipliers.c)
 target_sources_ifdef(CONFIG_ZMK_INPUT_SPLIT app PRIVATE input_split.c)
 
-if(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC OR CONFIG_PYURON_SCROLL_STUDIO_RPC)
+if(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC OR CONFIG_PYURON_SCROLL_STUDIO_RPC OR CONFIG_PYURON_SPEED_STUDIO_RPC)
     list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
     include(nanopb)
     set(NANOPB_GENERATE_CPP_APPEND_PATH TRUE)
@@ -56,4 +57,23 @@ if(CONFIG_PYURON_SCROLL_STUDIO_RPC)
 
     target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(app PRIVATE ${SCROLL_PROTO_LIB})
+endif()
+
+if(CONFIG_PYURON_SPEED_STUDIO_RPC)
+    target_sources(app PRIVATE speed_studio.c)
+
+    # Named library to avoid colliding with the other proto libraries in this
+    # same CMake directory scope.
+    zephyr_library_named(pyuron_speed_proto)
+    set(SPEED_PROTO_LIB ${ZEPHYR_CURRENT_LIBRARY})
+
+    file(GLOB_RECURSE SPEED_PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/speed/*.proto)
+    nanopb_generate_cpp(speed_proto_srcs speed_proto_hdrs
+                        RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                        ${SPEED_PROTO_FILES})
+    target_include_directories(${SPEED_PROTO_LIB} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+    target_sources(${SPEED_PROTO_LIB} PRIVATE ${speed_proto_srcs} ${speed_proto_hdrs})
+
+    target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(app PRIVATE ${SPEED_PROTO_LIB})
 endif()
