@@ -60,11 +60,13 @@ static struct {
     /* Runtime values (live-changeable) */
     uint32_t deactivation_ms;        /* 0 = use binding param2 until first call */
     uint32_t prior_idle_ms;
+    uint32_t extend_ms;              /* re-arm amount on excluded-key press (0 = seed from dwell) */
     uint16_t excluded_positions[AML_MAX_EXCLUDED];
     uint8_t  num_excluded;
     /* Devicetree defaults (for reset) */
     uint32_t default_deactivation_ms;  /* captured on first temp_layer_handle_event call */
     uint32_t default_prior_idle_ms;
+    uint32_t default_extend_ms;
     uint16_t default_excluded[AML_MAX_EXCLUDED];
     uint8_t  default_num_excluded;
     bool     defaults_captured;
@@ -75,6 +77,7 @@ static struct {
 int zmk_aml_get(struct zmk_aml_config *out) {
     out->deactivation_ms = aml_rt.deactivation_ms;
     out->prior_idle_ms   = aml_rt.prior_idle_ms;
+    out->extend_ms       = aml_rt.extend_ms;
     out->num_excluded    = aml_rt.num_excluded;
     memcpy(out->excluded_positions, aml_rt.excluded_positions,
            aml_rt.num_excluded * sizeof(uint16_t));
@@ -83,6 +86,11 @@ int zmk_aml_get(struct zmk_aml_config *out) {
 
 int zmk_aml_set_deactivation(uint32_t ms) {
     aml_rt.deactivation_ms = ms;
+    return 0;
+}
+
+int zmk_aml_set_extend(uint32_t ms) {
+    aml_rt.extend_ms = ms;
     return 0;
 }
 
@@ -114,12 +122,14 @@ int zmk_aml_toggle_excluded(uint32_t position) {
 int zmk_aml_reset(void) {
     aml_rt.deactivation_ms = aml_rt.default_deactivation_ms;
     aml_rt.prior_idle_ms   = aml_rt.default_prior_idle_ms;
+    aml_rt.extend_ms       = aml_rt.default_extend_ms;
     aml_rt.num_excluded    = aml_rt.default_num_excluded;
     memcpy(aml_rt.excluded_positions, aml_rt.default_excluded,
            aml_rt.default_num_excluded * sizeof(uint16_t));
     /* Drop NVS overrides so defaults persist across reboot */
     settings_delete(AML_SETTINGS_SUBTREE "/dec");
     settings_delete(AML_SETTINGS_SUBTREE "/idle");
+    settings_delete(AML_SETTINGS_SUBTREE "/ext");
     settings_delete(AML_SETTINGS_SUBTREE "/excl");
     return 0;
 }
@@ -131,6 +141,9 @@ int zmk_aml_save(void) {
     if (rc < 0) return rc;
     rc = settings_save_one(AML_SETTINGS_SUBTREE "/idle",
                            &aml_rt.prior_idle_ms, sizeof(aml_rt.prior_idle_ms));
+    if (rc < 0) return rc;
+    rc = settings_save_one(AML_SETTINGS_SUBTREE "/ext",
+                           &aml_rt.extend_ms, sizeof(aml_rt.extend_ms));
     if (rc < 0) return rc;
     /* Pack excluded: [num_excluded, pos0, pos1, ...] */
     uint8_t excl_buf[1 + AML_MAX_EXCLUDED * 2];
@@ -158,6 +171,12 @@ static int aml_settings_set(const char *name, size_t len,
         ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
         if (rc < 0) return (int)rc;
         aml_rt.prior_idle_ms = v;
+    } else if (strcmp(name, "ext") == 0) {
+        if (len != sizeof(uint32_t)) return -EINVAL;
+        uint32_t v;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        aml_rt.extend_ms = v;
     } else if (strcmp(name, "excl") == 0 && len >= 1) {
         uint8_t excl_buf[1 + AML_MAX_EXCLUDED * 2];
         ssize_t rc = read_cb(cb_arg, excl_buf, MIN(len, sizeof(excl_buf)));
@@ -316,13 +335,13 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
             /* Excluded key pressed while AML is active: extend the dwell timer
              * from now, so actively clicking (e.g. K / left-click) keeps the
-             * mouse layer alive just like trackball motion does. Reuses the
-             * same deactivation (dwell) value. */
-            uint32_t timeout_ms = aml_rt.deactivation_ms;
+             * mouse layer alive just like trackball motion does. The amount is
+             * a separate, app-adjustable value (defaults to the dwell). */
+            uint32_t timeout_ms = aml_rt.extend_ms;
             if (timeout_ms > 0) {
                 k_work_reschedule(&layer_disable_works[data->state.toggle_layer],
                                   K_MSEC(timeout_ms));
-                LOG_DBG("Excluded position, extending AML dwell by %u ms", timeout_ms);
+                LOG_DBG("Excluded position, extending AML by %u ms", timeout_ms);
             }
 #else
             LOG_DBG("Position excluded, continuing");
@@ -415,9 +434,15 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
      * override may already be in aml_rt.deactivation_ms. */
     if (!aml_rt.defaults_captured && param2 > 0) {
         aml_rt.default_deactivation_ms = param2;
+        aml_rt.default_extend_ms       = param2;
         if (aml_rt.deactivation_ms == 0) {
             /* No NVS override loaded yet — seed with the devicetree value */
             aml_rt.deactivation_ms = param2;
+        }
+        if (aml_rt.extend_ms == 0) {
+            /* Default the excluded-key extension to the dwell value; the user
+             * can then adjust it independently via the app slider. */
+            aml_rt.extend_ms = param2;
         }
         aml_rt.defaults_captured = true;
     }
