@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package pyuron.speed;
+
+// Runtime state of the Pyuron trackball speed multiplier.
+message SpeedInfo {
+    uint32 percent = 1;  // cursor speed multiplier in percent (100 = x1.0)
+}
+
+message GetRequest {}
+message SetRequest { uint32 percent = 1; }
+
+message Request {
+    oneof request_type {
+        GetRequest get = 1;
+        SetRequest set = 2;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        SpeedInfo     info  = 2;
+    }
+}
