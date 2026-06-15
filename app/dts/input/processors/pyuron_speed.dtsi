@@ -1,0 +1,22 @@
+/*
+ * Copyright (c) 2026 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ *
+ * Default node for the Pyuron trackball speed-multiplier processor.
+ * Include via <input/processors.dtsi> (already added there).
+ *
+ * Usage in a listener's input-processors array (place AFTER gesture detection
+ * so only cursor movement is scaled):
+ *   input-processors = <...>, <&zip_keybind_dynamic>, <&zip_pyuron_speed>;
+ *
+ * Runtime percent defaults to 100 (x1.0). Change it live via the
+ * "pyuron_speed" Studio RPC subsystem.
+ */
+
+/ {
+    /omit-if-no-ref/ zip_pyuron_speed: zip_pyuron_speed {
+        compatible = "zmk,input-processor-pyuron-speed";
+        #input-processor-cells = <0>;
+    };
+};
