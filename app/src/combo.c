@@ -570,34 +570,8 @@ struct pyuron_combo_nvs_blob {
     int32_t param2;
 } __packed;
 
-// Restored-from-NVS slot blobs, kept until combo_init() applies them.
-static struct pyuron_combo_nvs_blob pyuron_combo_restore[PYURON_COMBO_SLOTS];
-static bool pyuron_combo_restore_valid[PYURON_COMBO_SLOTS];
-
 static void pyuron_combo_settings_key(char *buf, size_t len, uint8_t slot) {
     snprintf(buf, len, PYURON_COMBO_SETTINGS_SUBTREE "/%u", slot);
-}
-
-// Write a slot's live combo_work[] entry into a packed NVS blob.
-static void pyuron_combo_pack(uint8_t slot, struct pyuron_combo_nvs_blob *blob) {
-    int idx = pyuron_combo_slot_to_idx[slot];
-    *blob = (struct pyuron_combo_nvs_blob){0};
-    if (idx < 0) {
-        return;
-    }
-    const struct combo_cfg *c = &combo_work[idx];
-    blob->enabled = (c->key_position_len > 0);
-    blob->key_len = (uint8_t)c->key_position_len;
-    for (int i = 0; i < PYURON_COMBO_MAX_KEYS && i < c->key_position_len; i++) {
-        blob->key_positions[i] = c->key_positions[i];
-    }
-    blob->timeout_ms = c->timeout_ms;
-    blob->layer_mask = c->layer_mask;
-#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS_IN_BINDINGS)
-    blob->behavior_local_id = c->behavior.local_id;
-#endif
-    blob->param1 = (int32_t)c->behavior.param1;
-    blob->param2 = (int32_t)c->behavior.param2;
 }
 
 // Apply a packed blob into the live combo_work[] entry for `slot`.
@@ -735,9 +709,12 @@ static int pyuron_combo_settings_set(const char *name, size_t len, settings_read
     if (rc < 0) {
         return (int)rc;
     }
-    // Stash; combo_init() applies after combo_work[] is seeded from DT.
-    pyuron_combo_restore[slot] = blob;
-    pyuron_combo_restore_valid[slot] = true;
+    // combo_init() (SYS_INIT) has already seeded combo_work[] and the slot map
+    // before settings_load() runs in main(), so apply directly and rebuild the
+    // lookup now. (Stashing for later would never get applied — combo_init
+    // already ran.)
+    pyuron_combo_apply_blob((uint8_t)slot, &blob);
+    pyuron_combo_rebuild_lookup();
     return 0;
 }
 
@@ -771,12 +748,9 @@ static int combo_init(void) {
             combo_work[i].key_position_len = 0;
         }
     }
-    // Apply any NVS-restored slot overrides captured by the settings handler.
-    for (int s = 0; s < PYURON_COMBO_SLOTS; s++) {
-        if (pyuron_combo_restore_valid[s]) {
-            pyuron_combo_apply_blob((uint8_t)s, &pyuron_combo_restore[s]);
-        }
-    }
+    // NVS-saved slots are applied later by pyuron_combo_settings_set() during
+    // main()'s settings_load() (which runs after this SYS_INIT), each rebuilding
+    // the lookup. Here we just build the initial lookup with placeholders off.
     for (int i = 0; i < ARRAY_SIZE(combo_work); i++) {
         if (combo_work[i].key_position_len > 0) {
             initialize_combo(i);
