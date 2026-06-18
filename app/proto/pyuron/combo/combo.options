@@ -1,0 +1,5 @@
+# Nanopb options for combo.proto — fixed sizes so messages are statically
+# sized (no malloc, no callbacks). 6 slots x up to 3 keys.
+pyuron.combo.ComboInfo.key_positions  max_count:3
+pyuron.combo.SetRequest.key_positions max_count:3
+pyuron.combo.ErrorResponse.message    max_size:48

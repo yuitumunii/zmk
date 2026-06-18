@@ -11,3 +11,10 @@ properties:
   tap-ms:
     type: int
     description: The default time to wait (in milliseconds) between the press and release events on a tapped macro behavior binding
+  pyuron-macro-slot:
+    type: int
+    description: |
+      Pyuron live-editing slot index (0..5). When set and
+      CONFIG_PYURON_MACRO_STUDIO_RPC is enabled, this macro's steps are read from
+      the RAM/NVS mirror for that slot instead of the flashed bindings, so they
+      can be edited at runtime from the desktop app.

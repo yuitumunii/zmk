@@ -25,3 +25,11 @@ child-binding:
       type: boolean
     layers:
       type: array
+    pyuron-combo-slot:
+      type: int
+      description: |
+        Pyuron live-editing slot index (0..5). When set and
+        CONFIG_PYURON_COMBO_STUDIO_RPC is enabled, this combo's key positions,
+        fire behavior, timeout and layer mask are taken from the RAM/NVS mirror
+        for that slot (and start disabled until configured), so they can be
+        edited at runtime from the desktop app.

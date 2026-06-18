@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package pyuron.combo;
+
+// Live editing of fixed combo slots (6). The combo key-set changes the lookup
+// table, so each slot is set atomically with a single SetRequest. See
+// app/src/combo.c (CONFIG_PYURON_COMBO_STUDIO_RPC).
+//
+// behavior_id is a ZMK behavior local id. layer_mask 0 = all layers.
+
+message ComboInfo {
+    uint32 id = 1;                       // slot index 0..5
+    repeated uint32 key_positions = 2;   // max_count:3
+    uint32 behavior_id = 3;              // fire behavior
+    int32 param1 = 4;
+    int32 param2 = 5;
+    uint32 timeout_ms = 6;
+    uint32 layer_mask = 7;               // 0 = all layers
+    bool enabled = 8;                    // slot active (empty key set / false = inactive)
+}
+
+message GetCountRequest {}
+message GetCountResponse { uint32 count = 1; }
+
+message GetRequest { uint32 id = 1; }
+message GetResponse { ComboInfo info = 1; }
+
+message SetRequest {
+    uint32 id = 1;
+    repeated uint32 key_positions = 2;   // max_count:3
+    uint32 behavior_id = 3;
+    int32 param1 = 4;
+    int32 param2 = 5;
+    uint32 timeout_ms = 6;
+    uint32 layer_mask = 7;
+    bool enabled = 8;
+}
+message SetResponse { ComboInfo info = 1; }
+
+message ClearRequest { uint32 id = 1; }
+message ClearResponse { ComboInfo info = 1; }
+
+message Request {
+    oneof request_type {
+        GetCountRequest get_count = 1;
+        GetRequest get = 2;
+        SetRequest set = 3;
+        ClearRequest clear = 4;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        GetCountResponse get_count = 2;
+        GetResponse get = 3;
+        SetResponse set = 4;
+        ClearResponse clear = 5;
+    }
+}

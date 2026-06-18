@@ -10,6 +10,14 @@
 #include <zmk/behavior.h>
 #include <zmk/behavior_queue.h>
 #include <zmk/keymap.h>
+#if IS_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC)
+#include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/settings/settings.h>
+#include <zmk/behaviors/macro_tuning.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -45,6 +53,9 @@ struct behavior_macro_config {
     uint32_t default_wait_ms;
     uint32_t default_tap_ms;
     uint32_t count;
+#if IS_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC)
+    int pyuron_slot; // >=0 => live-editable slot index, -1 => plain DT macro
+#endif
     struct zmk_behavior_binding bindings[];
 };
 
@@ -110,6 +121,155 @@ static bool handle_control_binding(struct behavior_macro_trigger_state *state,
 
     return true;
 }
+
+#if IS_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC)
+// RAM mirror: contents of each editable macro slot. Empty (valid=false) until
+// the RPC handler (or NVS restore) populates it. The DT-flashed bindings remain
+// the source of truth while a slot is invalid, so OFF/unset behavior is
+// identical to upstream.
+static struct pyuron_macro_slot pyuron_macro_slots[PYURON_MACRO_SLOTS];
+
+size_t pyuron_macro_get_count(void) { return PYURON_MACRO_SLOTS; }
+
+int pyuron_macro_get(uint8_t slot, struct pyuron_macro_slot *out) {
+    if (slot >= PYURON_MACRO_SLOTS || out == NULL) {
+        return -EINVAL;
+    }
+    *out = pyuron_macro_slots[slot];
+    return 0;
+}
+
+// Resolve a behavior local id to its (statically-stored) device name and stash
+// it in the binding so zmk_behavior_queue_add / invoke can run it. id 0 = &none.
+static void pyuron_macro_fill_binding(struct zmk_behavior_binding *b, uint32_t beh_id, int32_t p1,
+                                      int32_t p2) {
+    *b = (struct zmk_behavior_binding){0};
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS_IN_BINDINGS)
+    b->local_id = (zmk_behavior_local_id_t)beh_id;
+#endif
+    b->behavior_dev =
+        beh_id ? zmk_behavior_find_behavior_name_from_local_id((zmk_behavior_local_id_t)beh_id)
+               : NULL;
+    b->param1 = (uint32_t)p1;
+    b->param2 = (uint32_t)p2;
+}
+
+// --- NVS persistence -----------------------------------------------------
+// One blob per slot at "pmac/<slot>": { step_count; {local_id,p1,p2}[16] }.
+#define PYURON_MACRO_SETTINGS_SUBTREE "pmac"
+
+struct pyuron_macro_nvs_step {
+    uint16_t local_id;
+    int32_t param1;
+    int32_t param2;
+} __packed;
+
+struct pyuron_macro_nvs_blob {
+    uint8_t step_count;
+    struct pyuron_macro_nvs_step steps[PYURON_MACRO_MAX_STEPS];
+} __packed;
+
+static void pyuron_macro_settings_key(char *buf, size_t len, uint8_t slot) {
+    snprintf(buf, len, PYURON_MACRO_SETTINGS_SUBTREE "/%u", slot);
+}
+
+static int pyuron_macro_save(uint8_t slot) {
+    if (slot >= PYURON_MACRO_SLOTS) {
+        return -EINVAL;
+    }
+    struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    struct pyuron_macro_nvs_blob blob = {0};
+    blob.step_count = s->step_count;
+    for (int i = 0; i < PYURON_MACRO_MAX_STEPS; i++) {
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS_IN_BINDINGS)
+        blob.steps[i].local_id = s->steps[i].local_id;
+#else
+        blob.steps[i].local_id = 0;
+#endif
+        blob.steps[i].param1 = (int32_t)s->steps[i].param1;
+        blob.steps[i].param2 = (int32_t)s->steps[i].param2;
+    }
+    char key[16];
+    pyuron_macro_settings_key(key, sizeof(key), slot);
+    return settings_save_one(key, &blob, sizeof(blob));
+}
+
+int pyuron_macro_set_step(uint8_t slot, uint8_t idx, uint32_t beh_id, int32_t p1, int32_t p2) {
+    if (slot >= PYURON_MACRO_SLOTS || idx >= PYURON_MACRO_MAX_STEPS) {
+        return -EINVAL;
+    }
+    struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    s->valid = true;
+    pyuron_macro_fill_binding(&s->steps[idx], beh_id, p1, p2);
+    if (idx >= s->step_count) {
+        s->step_count = idx + 1;
+    }
+    return pyuron_macro_save(slot);
+}
+
+int pyuron_macro_set_len(uint8_t slot, uint8_t len) {
+    if (slot >= PYURON_MACRO_SLOTS || len > PYURON_MACRO_MAX_STEPS) {
+        return -EINVAL;
+    }
+    struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    s->valid = true;
+    s->step_count = len;
+    return pyuron_macro_save(slot);
+}
+
+int pyuron_macro_clear(uint8_t slot) {
+    if (slot >= PYURON_MACRO_SLOTS) {
+        return -EINVAL;
+    }
+    pyuron_macro_slots[slot] = (struct pyuron_macro_slot){0};
+    char key[16];
+    pyuron_macro_settings_key(key, sizeof(key), slot);
+    settings_delete(key);
+    return 0;
+}
+
+static int pyuron_macro_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                     void *cb_arg) {
+    uint8_t slot = (uint8_t)strtoul(name, NULL, 10);
+    if (slot >= PYURON_MACRO_SLOTS) {
+        return -EINVAL;
+    }
+    struct pyuron_macro_nvs_blob blob;
+    if (len != sizeof(blob)) {
+        return -EINVAL;
+    }
+    ssize_t rc = read_cb(cb_arg, &blob, sizeof(blob));
+    if (rc < 0) {
+        return (int)rc;
+    }
+    struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    *s = (struct pyuron_macro_slot){0};
+    s->valid = true;
+    s->step_count = MIN(blob.step_count, (uint8_t)PYURON_MACRO_MAX_STEPS);
+    for (int i = 0; i < PYURON_MACRO_MAX_STEPS; i++) {
+        pyuron_macro_fill_binding(&s->steps[i], blob.steps[i].local_id, blob.steps[i].param1,
+                                  blob.steps[i].param2);
+    }
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(pyuron_macro, PYURON_MACRO_SETTINGS_SUBTREE, NULL,
+                               pyuron_macro_settings_set, NULL, NULL);
+
+// Queue an editable slot's RAM steps as a plain tap macro (press+release each).
+static void pyuron_macro_queue_slot(struct zmk_behavior_binding_event *event,
+                                    const struct behavior_macro_config *cfg, uint8_t slot) {
+    struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    for (int i = 0; i < s->step_count; i++) {
+        if (!s->steps[i].behavior_dev) {
+            continue; // &none / unresolved => skip
+        }
+        struct zmk_behavior_binding binding = s->steps[i];
+        zmk_behavior_queue_add(event, binding, true, cfg->default_tap_ms);
+        zmk_behavior_queue_add(event, binding, false, cfg->default_wait_ms);
+    }
+}
+#endif /* CONFIG_PYURON_MACRO_STUDIO_RPC */
 
 static int behavior_macro_init(const struct device *dev) {
     const struct behavior_macro_config *cfg = dev->config;
@@ -194,6 +354,14 @@ static int on_macro_binding_pressed(struct zmk_behavior_binding *binding,
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     const struct behavior_macro_config *cfg = dev->config;
     struct behavior_macro_state *state = dev->data;
+
+#if IS_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC)
+    if (cfg->pyuron_slot >= 0 && pyuron_macro_slots[cfg->pyuron_slot].valid) {
+        pyuron_macro_queue_slot(&event, cfg, (uint8_t)cfg->pyuron_slot);
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+#endif
+
     struct behavior_macro_trigger_state trigger_state = {.mode = MACRO_MODE_TAP,
                                                          .tap_ms = cfg->default_tap_ms,
                                                          .wait_ms = cfg->default_wait_ms,
@@ -210,6 +378,14 @@ static int on_macro_binding_released(struct zmk_behavior_binding *binding,
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     const struct behavior_macro_config *cfg = dev->config;
     struct behavior_macro_state *state = dev->data;
+
+#if IS_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC)
+    if (cfg->pyuron_slot >= 0 && pyuron_macro_slots[cfg->pyuron_slot].valid) {
+        // Editable slots run as pure tap macros (press+release queued together
+        // on press); nothing to do on the physical key release.
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+#endif
 
     queue_macro(&event, cfg->bindings, state->release_state, binding);
 
@@ -321,6 +497,8 @@ static const struct behavior_driver_api behavior_macro_driver_api = {
         .default_wait_ms = DT_PROP_OR(inst, wait_ms, CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS),            \
         .default_tap_ms = DT_PROP_OR(inst, tap_ms, CONFIG_ZMK_MACRO_DEFAULT_TAP_MS),               \
         .count = DT_PROP_LEN(inst, bindings),                                                      \
+        IF_ENABLED(CONFIG_PYURON_MACRO_STUDIO_RPC,                                                 \
+                   (.pyuron_slot = DT_PROP_OR(inst, pyuron_macro_slot, -1), ))                     \
         .bindings = TRANSFORMED_BEHAVIORS(inst)};                                                  \
     BEHAVIOR_DT_DEFINE(inst, behavior_macro_init, NULL, &behavior_macro_state_##inst,              \
                        &behavior_macro_config_##inst, POST_KERNEL,                                 \

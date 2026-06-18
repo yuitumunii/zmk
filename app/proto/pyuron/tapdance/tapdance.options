@@ -1,0 +1,4 @@
+# Nanopb options for tapdance.proto — fixed sizes so messages are statically
+# sized (no malloc, no callbacks). 4 slots x up to 4 counts.
+pyuron.tapdance.TapDanceInfo.steps    max_count:4
+pyuron.tapdance.ErrorResponse.message max_size:48

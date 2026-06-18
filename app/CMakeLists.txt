@@ -143,6 +143,29 @@ if (CONFIG_ZMK_STUDIO_RPC)
     target_sources(app PRIVATE ${timing_proto_srcs} ${timing_proto_hdrs})
   endif()
 
+  # Phase B custom subsystems (live macro / combo / tap-dance editing). Same
+  # RELPATH pattern so headers resolve as <pyuron/<feat>/<feat>.pb.h>.
+  if (CONFIG_PYURON_MACRO_STUDIO_RPC)
+    nanopb_generate_cpp(macro_proto_srcs macro_proto_hdrs
+                          RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                          ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/macro/macro.proto)
+    target_sources(app PRIVATE ${macro_proto_srcs} ${macro_proto_hdrs})
+  endif()
+
+  if (CONFIG_PYURON_COMBO_STUDIO_RPC)
+    nanopb_generate_cpp(combo_proto_srcs combo_proto_hdrs
+                          RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                          ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/combo/combo.proto)
+    target_sources(app PRIVATE ${combo_proto_srcs} ${combo_proto_hdrs})
+  endif()
+
+  if (CONFIG_PYURON_TAPDANCE_STUDIO_RPC)
+    nanopb_generate_cpp(tapdance_proto_srcs tapdance_proto_hdrs
+                          RELPATH ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                          ${CMAKE_CURRENT_SOURCE_DIR}/proto/pyuron/tapdance/tapdance.proto)
+    target_sources(app PRIVATE ${tapdance_proto_srcs} ${tapdance_proto_hdrs})
+  endif()
+
   add_subdirectory(src/studio)
 endif()
 

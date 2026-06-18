@@ -144,6 +144,34 @@ config PYURON_TIMING_STUDIO_RPC
       without reflashing, and persists the values to NVS. Requires the
       custom-studio-protocol RPC base.
 
+config PYURON_MACRO_STUDIO_RPC
+    bool "Pyuron live macro editing (custom RPC)"
+    default n
+    help
+      Custom Studio RPC subsystem (pyuron_macro) that live-edits the contents of
+      fixed macro slots (&pmac0..&pmac5) from the desktop app without
+      reflashing, persisting each slot to NVS. Each editable macro instance must
+      carry a pyuron-macro-slot devicetree property.
+
+config PYURON_COMBO_STUDIO_RPC
+    bool "Pyuron live combo editing (custom RPC)"
+    default n
+    help
+      Custom Studio RPC subsystem (pyuron_combo) that live-edits fixed combo
+      slots (key positions + fire behavior + timeout + layer mask) from the
+      desktop app without reflashing, persisting each slot to NVS. Each editable
+      combo must carry a pyuron-combo-slot devicetree property.
+
+config PYURON_TAPDANCE_STUDIO_RPC
+    bool "Pyuron live tap-dance editing (custom RPC)"
+    default n
+    depends on ZMK_BEHAVIOR_TAP_DANCE
+    help
+      Custom Studio RPC subsystem (pyuron_tapdance) that live-edits the contents
+      of fixed tap-dance slots (&ptd0..&ptd3) from the desktop app without
+      reflashing, persisting each slot to NVS. Each editable tap-dance instance
+      must carry a pyuron-td-slot devicetree property.
+
 endif
 
 endif

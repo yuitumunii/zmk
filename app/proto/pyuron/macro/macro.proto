@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package pyuron.macro;
+
+// Live editing of fixed macro slots (&pmac0..&pmac5). Only the *contents* of
+// each slot live in RAM/NVS; the DT only flashes the empty slot shells. See
+// app/src/behaviors/behavior_macro.c (CONFIG_PYURON_MACRO_STUDIO_RPC).
+//
+// behavior_id is a ZMK behavior local id (zmk_behavior_local_id_t). 0 = &none
+// (empty step). Tag numbers below are the contract shared with the TS client.
+
+message MacroStep {
+    uint32 behavior_id = 1;
+    int32 param1 = 2;
+    int32 param2 = 3;
+}
+
+message MacroInfo {
+    uint32 id = 1;                // slot index 0..5
+    uint32 step_count = 2;        // valid step count 0..16
+    repeated MacroStep steps = 3; // max_count:16
+}
+
+message GetCountRequest {}
+message GetCountResponse { uint32 count = 1; }
+
+message GetRequest { uint32 id = 1; }
+message GetResponse { MacroInfo info = 1; }
+
+// Rewrite one step (behavior_id=0 => &none = empty step).
+message SetStepRequest {
+    uint32 id = 1;
+    uint32 index = 2;
+    uint32 behavior_id = 3;
+    int32 param1 = 4;
+    int32 param2 = 5;
+}
+message SetStepResponse { MacroInfo info = 1; }
+
+message SetLenRequest { uint32 id = 1; uint32 len = 2; } // valid step count
+message SetLenResponse { MacroInfo info = 1; }
+
+message ClearRequest { uint32 id = 1; } // len=0 + all steps none
+message ClearResponse { MacroInfo info = 1; }
+
+message Request {
+    oneof request_type {
+        GetCountRequest get_count = 1;
+        GetRequest get = 2;
+        SetStepRequest set_step = 3;
+        SetLenRequest set_len = 4;
+        ClearRequest clear = 5;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        GetCountResponse get_count = 2;
+        GetResponse get = 3;
+        SetStepResponse set_step = 4;
+        SetLenResponse set_len = 5;
+        ClearResponse clear = 6;
+    }
+}

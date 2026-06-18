@@ -1,0 +1,4 @@
+# Nanopb options for macro.proto — fixed sizes so messages are statically
+# sized (no malloc, no callbacks). 6 slots x 16 steps editing.
+pyuron.macro.MacroInfo.steps        max_count:16
+pyuron.macro.ErrorResponse.message  max_size:48

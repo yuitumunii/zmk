@@ -14,3 +14,10 @@ properties:
   tapping-term-ms:
     type: int
     default: 200
+  pyuron-td-slot:
+    type: int
+    description: |
+      Pyuron live-editing slot index (0..3). When set and
+      CONFIG_PYURON_TAPDANCE_STUDIO_RPC is enabled, this tap-dance's steps,
+      count and tapping term are read from the RAM/NVS mirror for that slot
+      instead of the flashed values, so they can be edited at runtime.
