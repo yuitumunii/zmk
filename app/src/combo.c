@@ -587,6 +587,15 @@ static void pyuron_combo_apply_blob(uint8_t slot, const struct pyuron_combo_nvs_
         c->key_position_len = 0;
         return;
     }
+    // Reject out-of-range key positions (corrupt NVS or malformed RPC) so they
+    // can never index combo_lookup[ZMK_KEYMAP_LEN] out of bounds in
+    // initialize_combo(). Treat any invalid key as "disable this slot".
+    for (int i = 0; i < key_len; i++) {
+        if (blob->key_positions[i] < 0 || blob->key_positions[i] >= ZMK_KEYMAP_LEN) {
+            c->key_position_len = 0;
+            return;
+        }
+    }
     c->key_position_len = key_len;
     for (int i = 0; i < PYURON_COMBO_MAX_KEYS; i++) {
         c->key_positions[i] = (i < key_len) ? blob->key_positions[i] : 0;
@@ -658,6 +667,18 @@ int pyuron_combo_set(uint8_t slot, const int32_t *keys, uint8_t key_len, uint32_
     if (pyuron_combo_slot_to_idx[slot] < 0) {
         return -ENODEV; // no DT placeholder reserved for this slot
     }
+    // Reject out-of-range key positions before they reach combo_lookup[].
+    for (int i = 0; i < key_len; i++) {
+        if (keys[i] < 0 || keys[i] >= ZMK_KEYMAP_LEN) {
+            return -EINVAL;
+        }
+    }
+    // Don't tear down combo_lookup/active_combos while a press is in flight
+    // (RPC thread vs input listener). The app edits combos while not chording,
+    // so this is effectively never hit; callers may retry.
+    if (pressed_keys_count > 0 || active_combo_count > 0) {
+        return -EBUSY;
+    }
     struct pyuron_combo_nvs_blob blob = {0};
     blob.enabled = enabled;
     blob.key_len = key_len;
@@ -681,6 +702,9 @@ int pyuron_combo_set(uint8_t slot, const int32_t *keys, uint8_t key_len, uint32_
 int pyuron_combo_clear(uint8_t slot) {
     if (slot >= PYURON_COMBO_SLOTS) {
         return -EINVAL;
+    }
+    if (pressed_keys_count > 0 || active_combo_count > 0) {
+        return -EBUSY; // see pyuron_combo_set()
     }
     int idx = pyuron_combo_slot_to_idx[slot];
     if (idx >= 0) {
