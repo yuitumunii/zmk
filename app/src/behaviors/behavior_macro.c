@@ -261,10 +261,24 @@ static void pyuron_macro_queue_slot(struct zmk_behavior_binding_event *event,
                                     const struct behavior_macro_config *cfg, uint8_t slot) {
     struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
     for (int i = 0; i < s->step_count; i++) {
-        if (!s->steps[i].behavior_dev) {
-            continue; // &none / unresolved => skip
-        }
         struct zmk_behavior_binding binding = s->steps[i];
+        // behavior_dev may be NULL if the local-id<->name table (loaded from
+        // settings with CONFIG_ZMK_BEHAVIOR_LOCAL_ID_TYPE_SETTINGS_TABLE) was not
+        // yet available when this slot was restored from NVS at boot. Re-resolve
+        // here at fire time, when the table is guaranteed loaded.
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS_IN_BINDINGS)
+        if (!binding.behavior_dev && binding.local_id) {
+            binding.behavior_dev =
+                zmk_behavior_find_behavior_name_from_local_id(binding.local_id);
+            // Cache the resolution so later presses skip the lookup.
+            if (binding.behavior_dev) {
+                s->steps[i].behavior_dev = binding.behavior_dev;
+            }
+        }
+#endif
+        if (!binding.behavior_dev) {
+            continue; // &none / still unresolved => skip
+        }
         zmk_behavior_queue_add(event, binding, true, cfg->default_tap_ms);
         zmk_behavior_queue_add(event, binding, false, cfg->default_wait_ms);
     }
