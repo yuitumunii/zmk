@@ -256,12 +256,28 @@ static int pyuron_macro_settings_set(const char *name, size_t len, settings_read
 SETTINGS_STATIC_HANDLER_DEFINE(pyuron_macro, PYURON_MACRO_SETTINGS_SUBTREE, NULL,
                                pyuron_macro_settings_set, NULL, NULL);
 
-// Queue an editable slot's RAM steps as a plain tap macro (press+release each).
+// A wait step is encoded by the app as: no behavior (behavior_id 0) + param2 == 1,
+// with param1 = milliseconds. It sets the inter-key gap for the following keys
+// (same model as &macro_wait_time), so the editor can show "key → wait → key"
+// without needing the macro-control behavior exposed to Studio. Keep this value
+// in sync with the app (src/keyboard/MacroEditor.tsx WAIT_MARKER).
+#define PYURON_MACRO_WAIT_MARKER 1
+
+// Queue an editable slot's RAM steps as a tap macro (press+release each), honoring
+// inline "wait" steps that adjust the gap between subsequent keys.
 static void pyuron_macro_queue_slot(struct zmk_behavior_binding_event *event,
                                     const struct behavior_macro_config *cfg, uint8_t slot) {
     struct pyuron_macro_slot *s = &pyuron_macro_slots[slot];
+    uint32_t wait_ms = cfg->default_wait_ms;
     for (int i = 0; i < s->step_count; i++) {
         struct zmk_behavior_binding binding = s->steps[i];
+
+        // Wait step: change the gap applied after the following keys.
+        if (!binding.behavior_dev && binding.param2 == PYURON_MACRO_WAIT_MARKER) {
+            wait_ms = binding.param1;
+            continue;
+        }
+
         // behavior_dev may be NULL if the local-id<->name table (loaded from
         // settings with CONFIG_ZMK_BEHAVIOR_LOCAL_ID_TYPE_SETTINGS_TABLE) was not
         // yet available when this slot was restored from NVS at boot. Re-resolve
@@ -280,7 +296,7 @@ static void pyuron_macro_queue_slot(struct zmk_behavior_binding_event *event,
             continue; // &none / still unresolved => skip
         }
         zmk_behavior_queue_add(event, binding, true, cfg->default_tap_ms);
-        zmk_behavior_queue_add(event, binding, false, cfg->default_wait_ms);
+        zmk_behavior_queue_add(event, binding, false, wait_ms);
     }
 }
 #endif /* CONFIG_PYURON_MACRO_STUDIO_RPC */
