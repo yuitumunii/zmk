@@ -32,22 +32,34 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if IS_ENABLED(CONFIG_PYURON_SPEED_STUDIO_RPC)
 
-#define SPEED_SETTINGS_SUBTREE "speed"
-#define SPEED_PERCENT_DEFAULT  100
-#define SPEED_PERCENT_MIN      10
-#define SPEED_PERCENT_MAX      1000
+#define SPEED_SETTINGS_SUBTREE   "speed"
+#define SPEED_PERCENT_DEFAULT    100
+#define SPEED_PERCENT_MIN        10
+#define SPEED_PERCENT_MAX        1000
+#define ACCEL_STRENGTH_DEFAULT   50
+#define ACCEL_STRENGTH_MAX       100
+#define ACCEL_DIV                400   /* quadratic curve divisor */
+#define ACCEL_BOOST_MAX          400   /* cap on the extra percent added by accel */
 
 static struct {
-    uint32_t percent;     /* 100 = x1.0 */
-    int32_t  rem_x;       /* remainder accumulators (sub-100 precision) */
+    uint32_t percent;         /* 100 = x1.0 */
+    bool     accel_on;        /* mouse acceleration on/off (default false) */
+    uint32_t accel_strength;  /* 0..100 (default 50) */
+    int32_t  rem_x;           /* remainder accumulators (sub-100 precision) */
     int32_t  rem_y;
     bool     seeded;
-} speed_rt = { .percent = SPEED_PERCENT_DEFAULT };
+} speed_rt = {
+    .percent = SPEED_PERCENT_DEFAULT,
+    .accel_on = false,
+    .accel_strength = ACCEL_STRENGTH_DEFAULT,
+};
 
 /* ---- Public API (used by speed_studio.c) --------------------------------- */
 
 int zmk_speed_get(struct zmk_speed_config *out) {
     out->percent = speed_rt.percent ? speed_rt.percent : SPEED_PERCENT_DEFAULT;
+    out->accel_on = speed_rt.accel_on;
+    out->accel_strength = speed_rt.accel_strength;
     return 0;
 }
 
@@ -58,9 +70,27 @@ int zmk_speed_set(uint32_t percent) {
     return 0;
 }
 
+int zmk_speed_set_accel(bool on, uint32_t strength) {
+    if (strength > ACCEL_STRENGTH_MAX) strength = ACCEL_STRENGTH_MAX;
+    speed_rt.accel_on = on;
+    speed_rt.accel_strength = strength;
+    return 0;
+}
+
 int zmk_speed_save(void) {
-    return settings_save_one(SPEED_SETTINGS_SUBTREE "/p",
-                             &speed_rt.percent, sizeof(speed_rt.percent));
+    int rc;
+    rc = settings_save_one(SPEED_SETTINGS_SUBTREE "/p",
+                           &speed_rt.percent, sizeof(speed_rt.percent));
+    if (rc) return rc;
+
+    uint8_t accel_on_u8 = speed_rt.accel_on ? 1 : 0;
+    rc = settings_save_one(SPEED_SETTINGS_SUBTREE "/a",
+                           &accel_on_u8, sizeof(accel_on_u8));
+    if (rc) return rc;
+
+    rc = settings_save_one(SPEED_SETTINGS_SUBTREE "/s",
+                           &speed_rt.accel_strength, sizeof(speed_rt.accel_strength));
+    return rc;
 }
 
 /* ---- NVS settings loader ------------------------------------------------- */
@@ -75,6 +105,19 @@ static int speed_settings_set(const char *name, size_t len,
         if (v < SPEED_PERCENT_MIN) v = SPEED_PERCENT_MIN;
         if (v > SPEED_PERCENT_MAX) v = SPEED_PERCENT_MAX;
         speed_rt.percent = v;
+    } else if (strcmp(name, "a") == 0) {
+        uint8_t v;
+        if (len != sizeof(v)) return -EINVAL;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        speed_rt.accel_on = (v != 0);
+    } else if (strcmp(name, "s") == 0) {
+        uint32_t v;
+        if (len != sizeof(v)) return -EINVAL;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        if (v > ACCEL_STRENGTH_MAX) v = ACCEL_STRENGTH_MAX;
+        speed_rt.accel_strength = v;
     }
     return 0;
 }
@@ -102,21 +145,27 @@ static int speed_handle_event(const struct device *dev,
     }
 
 #if IS_ENABLED(CONFIG_PYURON_SPEED_STUDIO_RPC)
-    uint32_t percent = speed_rt.percent ? speed_rt.percent : SPEED_PERCENT_DEFAULT;
-    if (percent == 100) {
-        return ZMK_INPUT_PROC_CONTINUE; /* identity */
-    }
-
-    int32_t *rem = NULL;
-    if (event->code == INPUT_REL_X) {
-        rem = &speed_rt.rem_x;
-    } else if (event->code == INPUT_REL_Y) {
-        rem = &speed_rt.rem_y;
-    } else {
+    if (event->code != INPUT_REL_X && event->code != INPUT_REL_Y) {
         return ZMK_INPUT_PROC_CONTINUE; /* don't scale wheel/other axes */
     }
 
-    int32_t scaled = event->value * (int32_t)percent + *rem;
+    uint32_t base = speed_rt.percent ? speed_rt.percent : SPEED_PERCENT_DEFAULT;
+    uint32_t eff = base;
+    if (speed_rt.accel_on) {
+        int32_t v = event->value;
+        uint32_t spd = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
+        /* quadratic curve: faster movement boosts more; strength(0..100) scales it. */
+        uint32_t boost = (spd * spd * speed_rt.accel_strength) / ACCEL_DIV; /* extra percent */
+        if (boost > ACCEL_BOOST_MAX) boost = ACCEL_BOOST_MAX;
+        eff = base * (100 + boost) / 100;
+    }
+    if (eff == 100) {
+        return ZMK_INPUT_PROC_CONTINUE; /* identity */
+    }
+
+    int32_t *rem = (event->code == INPUT_REL_X) ? &speed_rt.rem_x : &speed_rt.rem_y;
+
+    int32_t scaled = event->value * (int32_t)eff + *rem;
     int32_t out = scaled / 100;
     *rem = scaled - out * 100; /* keep fractional remainder */
     event->value = out;

@@ -4,11 +4,17 @@ package pyuron.speed;
 
 // Runtime state of the Pyuron trackball speed multiplier.
 message SpeedInfo {
-    uint32 percent = 1;  // cursor speed multiplier in percent (100 = x1.0)
+    uint32 percent = 1;         // cursor speed multiplier in percent (100 = x1.0)
+    bool   accel_on = 2;        // mouse acceleration on/off
+    uint32 accel_strength = 3;  // acceleration strength 0..100 (only when accel_on)
 }
 
 message GetRequest {}
-message SetRequest { uint32 percent = 1; }
+message SetRequest {
+    uint32 percent = 1;
+    bool   accel_on = 2;
+    uint32 accel_strength = 3;
+}
 
 message Request {
     oneof request_type {

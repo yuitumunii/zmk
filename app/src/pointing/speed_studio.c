@@ -35,6 +35,8 @@ static void fill_info_response(pyuron_speed_Response *resp) {
     pyuron_speed_SpeedInfo *info = &resp->response_type.info;
     *info = (pyuron_speed_SpeedInfo)pyuron_speed_SpeedInfo_init_zero;
     info->percent = cfg.percent;
+    info->accel_on = cfg.accel_on;
+    info->accel_strength = cfg.accel_strength;
 }
 
 static bool speed_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
@@ -59,6 +61,10 @@ static bool speed_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
         break;
     case pyuron_speed_Request_set_tag:
         rc = zmk_speed_set(req.request_type.set.percent);
+        if (rc == 0) {
+            rc = zmk_speed_set_accel(req.request_type.set.accel_on,
+                                     req.request_type.set.accel_strength);
+        }
         if (rc == 0) { zmk_speed_save(); }
         break;
     default:
