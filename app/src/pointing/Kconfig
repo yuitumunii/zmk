@@ -55,6 +55,54 @@ config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
       Requires the ZMK fork with custom-studio-protocol support.
       Changes are persisted to NVS and survive reboot.
 
+# ---- AML config seed (version-gated) -------------------------------------
+# ソース側に「シード値＋バージョン番号」を持たせ、起動時に
+#   ソースの SEED_VERSION > NVS に記録済みの取り込み済みバージョン
+# のときだけシード値を NVS に書き込む。同じか古ければ何もしない
+# (ライブ調整値を温存)。default 0 = シードしない(現状の NVS を一切触らない)。
+if ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
+
+config PYURON_AML_SEED_VERSION
+    int "AML seed version (0 = never seed)"
+    default 0
+    help
+      ソースが持つ AML シード設定のバージョン番号。起動時に NVS に記録された
+      取り込み済みバージョンより大きいときだけ、下記の SEED_* 値を NVS へ
+      取り込む(1度だけ)。0 のままならシードは走らず、既存の NVS 値
+      (ライブ調整値)は一切変更されない(非破壊・出荷時デフォルト)。
+      新しいシード値を反映させたいときだけ、この番号を 1 ずつ増やす。
+
+config PYURON_AML_SEED_DEACTIVATION_MS
+    int "AML seed: deactivation_ms (-1 = leave unchanged)"
+    default -1
+    help
+      シード時に書き込む AML 滞在時間(ms)。-1(既定)は「未指定」とみなし、その
+      項目は据え置く(既存値/param2 由来の既定を温存)。0 以上は明示値として焼く。
+
+config PYURON_AML_SEED_PRIOR_IDLE_MS
+    int "AML seed: prior_idle_ms (-1 = leave unchanged)"
+    default -1
+    help
+      シード時に書き込む AML 発火ガード(ms)。-1(既定)は「未指定」=据え置き。
+      0 は有効値(ガードなし=いつでも入る)として焼けるよう、印は -1 を使う。
+
+config PYURON_AML_SEED_EXTEND_MS
+    int "AML seed: extend_ms (-1 = leave unchanged)"
+    default -1
+    help
+      シード時に書き込む除外キー延長(ms)。-1(既定)は「未指定」=据え置き。
+      0 は有効値(延長しない)として焼けるよう、印は -1 を使う。
+
+config PYURON_AML_SEED_EXCLUDED
+    string "AML seed: excluded positions (space-separated, empty = leave unchanged)"
+    default ""
+    help
+      シード時に書き込む除外キー位置の配列。"12 34 56" のように空白区切りで
+      位置番号を並べる。空文字は「未指定」とみなし、除外リストは据え置く。
+      AML_MAX_EXCLUDED(=16) を超える分・範囲外は無視する。
+
+endif # ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
+
 config ZMK_INPUT_PROCESSOR_PYURON_SCROLL_INVERT
     bool "Pyuron scroll-direction inverter input processor"
     default y

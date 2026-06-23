@@ -17,6 +17,9 @@
 #include <zmk/events/layer_state_changed.h>
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
+#include <stdint.h>
+#include <stdlib.h>          /* strtol (excluded-positions seed parser) */
+#include <string.h>          /* strcmp / memcpy */
 #include <zephyr/settings/settings.h>
 #include <zmk/pointing/aml.h>
 #endif
@@ -71,6 +74,12 @@ static struct {
     uint8_t  default_num_excluded;
     bool     defaults_captured;
 } aml_rt;
+
+/* ---- Version-gated seed -------------------------------------------------- */
+/* NVS から読み込んだ「取り込み済みシードバージョン」。settings_load 中に
+ * "aml/seedver" が見つかれば aml_settings_set で更新される。NVS に無ければ
+ * 0 のまま(=まだ一度もシードしていない)。 */
+static uint32_t aml_seedver_loaded;
 
 /* ---- Public AML API (used by aml_studio.c) ------------------------------- */
 
@@ -184,12 +193,109 @@ static int aml_settings_set(const char *name, size_t len,
         uint8_t n = MIN(excl_buf[0], AML_MAX_EXCLUDED);
         aml_rt.num_excluded = n;
         memcpy(aml_rt.excluded_positions, excl_buf + 1, n * sizeof(uint16_t));
+    } else if (strcmp(name, "seedver") == 0) {
+        if (len != sizeof(uint32_t)) return -EINVAL;
+        uint32_t v;
+        ssize_t rc = read_cb(cb_arg, &v, sizeof(v));
+        if (rc < 0) return (int)rc;
+        aml_seedver_loaded = v;
     }
     return 0;
 }
 
+/* ---- Version-gated seed application -------------------------------------- */
+/* 空白区切り文字列("12 34 56")を uint16 配列へパースする。範囲外/上限超過は
+ * 無視。strtol を使いオーバーランしない。戻り値 = 取り込んだ件数。 */
+static uint8_t aml_parse_excluded(const char *s, uint16_t *out, uint8_t max) {
+    uint8_t n = 0;
+    if (!s) {
+        return 0;
+    }
+    const char *p = s;
+    while (*p && n < max) {
+        /* 区切り(空白・タブ等)を読み飛ばす */
+        while (*p && !(*p >= '0' && *p <= '9') && *p != '-') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        char *end = NULL;
+        long val = strtol(p, &end, 10);
+        if (end == p) {
+            /* 数値として進まなかった = 不正文字。1 文字進めて続行 */
+            p++;
+            continue;
+        }
+        p = end;
+        if (val < 0 || val > UINT16_MAX) {
+            /* 範囲外は無視 */
+            continue;
+        }
+        out[n++] = (uint16_t)val;
+    }
+    return n;
+}
+
+/* settings_load() による全 set 呼出しが終わった後に呼ばれる commit。
+ * ここで初めて aml_seedver_loaded が確定するので、シード判定は必ずここで行う
+ * (set より前に走らせると seedver が常に 0 扱いになり毎回シードしてしまう)。 */
+static int aml_settings_commit(void) {
+    if (CONFIG_PYURON_AML_SEED_VERSION <= 0) {
+        /* version=0(既定) = シードしない。現状の NVS 値は一切触らない。 */
+        return 0;
+    }
+    if ((uint32_t)CONFIG_PYURON_AML_SEED_VERSION <= aml_seedver_loaded) {
+        LOG_DBG("AML seed v%d already applied (loaded v%u), skipping",
+                CONFIG_PYURON_AML_SEED_VERSION, aml_seedver_loaded);
+        return 0;
+    }
+
+    /* バージョンが上がった回だけ 1 度取り込む。
+     * 印 -1(または空文字)は「未指定」とみなし、その項目は据え置く。
+     * 0 以上は明示値として焼く。これにより prior_idle_ms=0(ガードなし)や
+     * extend_ms=0(延長なし)という有効値も正しくシードできる。未指定(-1)の
+     * deactivation は 0 のまま残り、初回 handle_event での param2 由来の
+     * 既定シードを壊さない。 */
+    if (CONFIG_PYURON_AML_SEED_DEACTIVATION_MS >= 0) {
+        aml_rt.deactivation_ms = (uint32_t)CONFIG_PYURON_AML_SEED_DEACTIVATION_MS;
+    }
+    if (CONFIG_PYURON_AML_SEED_PRIOR_IDLE_MS >= 0) {
+        aml_rt.prior_idle_ms = (uint32_t)CONFIG_PYURON_AML_SEED_PRIOR_IDLE_MS;
+    }
+    if (CONFIG_PYURON_AML_SEED_EXTEND_MS >= 0) {
+        aml_rt.extend_ms = (uint32_t)CONFIG_PYURON_AML_SEED_EXTEND_MS;
+    }
+    {
+        const char *excl_str = CONFIG_PYURON_AML_SEED_EXCLUDED;
+        if (excl_str && excl_str[0] != '\0') {
+            uint16_t parsed[AML_MAX_EXCLUDED];
+            uint8_t n = aml_parse_excluded(excl_str, parsed, AML_MAX_EXCLUDED);
+            aml_rt.num_excluded = n;
+            memcpy(aml_rt.excluded_positions, parsed, n * sizeof(uint16_t));
+        }
+    }
+
+    /* AML のキー(dec/idle/ext/excl)だけを永続化。BLE ボンド等の他 NVS は触らない。 */
+    int rc = zmk_aml_save();
+    if (rc < 0) {
+        LOG_ERR("AML seed save failed (%d)", rc);
+        return rc;
+    }
+    /* 取り込み済みバージョンを更新(以後 同バージョンでは再シードしない)。 */
+    uint32_t ver = (uint32_t)CONFIG_PYURON_AML_SEED_VERSION;
+    rc = settings_save_one(AML_SETTINGS_SUBTREE "/seedver", &ver, sizeof(ver));
+    if (rc < 0) {
+        LOG_ERR("AML seedver save failed (%d)", rc);
+        return rc;
+    }
+    aml_seedver_loaded = ver;
+    LOG_INF("seeded AML config v%u", ver);
+    return 0;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(pyuron_aml, AML_SETTINGS_SUBTREE, NULL,
-                               aml_settings_set, NULL, NULL);
+                               aml_settings_set, aml_settings_commit, NULL);
 
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC */
 
