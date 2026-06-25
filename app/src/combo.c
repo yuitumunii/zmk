@@ -737,13 +737,55 @@ static int pyuron_combo_settings_set(const char *name, size_t len, settings_read
     // before settings_load() runs in main(), so apply directly and rebuild the
     // lookup now. (Stashing for later would never get applied — combo_init
     // already ran.)
+    //
+    // NOTE: behavior_dev resolved here may be NULL. settings_load() runs every
+    // handler's set() first, then every commit(). With SETTINGS_TABLE local IDs
+    // the behavior local_id<->name map is only populated by the behavior
+    // handler's set() pass, whose order relative to ours is not guaranteed. If
+    // "pcmb/*" is processed before "behavior/local_id/*", the lookup in
+    // pyuron_combo_apply_blob() lands NULL and the combo restores its keys but
+    // fires nothing until re-applied over RPC. pyuron_combo_settings_commit()
+    // below re-resolves once all set() passes have run.
     pyuron_combo_apply_blob((uint8_t)slot, &blob);
     pyuron_combo_rebuild_lookup();
     return 0;
 }
 
+// Runs after every settings handler's set() pass during settings_load(), so the
+// behavior local_id<->name map is fully populated. Re-resolve each restored
+// slot's behavior_dev from its persisted local_id (set() may have raced and
+// stored NULL) and rebuild the lookup once. Idempotent: a behavior_dev that was
+// already resolved correctly is just re-assigned the same value.
+static int pyuron_combo_settings_commit(void) {
+    for (int s = 0; s < PYURON_COMBO_SLOTS; s++) {
+        int idx = pyuron_combo_slot_to_idx[s];
+        if (idx < 0) {
+            continue;
+        }
+        struct combo_cfg *c = &combo_work[idx];
+        if (c->key_position_len == 0) {
+            continue;
+        }
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS_IN_BINDINGS)
+        if (c->behavior.local_id) {
+            c->behavior.behavior_dev =
+                zmk_behavior_find_behavior_name_from_local_id(c->behavior.local_id);
+            // If it is still NULL here the local_id<->name map never produced a
+            // match (behavior removed/renamed, or a save from older firmware).
+            // The slot stays restored but will not fire; surface why.
+            if (!c->behavior.behavior_dev) {
+                LOG_ERR("Combo slot %d: no behavior for local_id %u; will not fire", s,
+                        c->behavior.local_id);
+            }
+        }
+#endif
+    }
+    pyuron_combo_rebuild_lookup();
+    return 0;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(pyuron_combo, PYURON_COMBO_SETTINGS_SUBTREE, NULL,
-                               pyuron_combo_settings_set, NULL, NULL);
+                               pyuron_combo_settings_set, pyuron_combo_settings_commit, NULL);
 
 #endif /* CONFIG_PYURON_COMBO_STUDIO_RPC */
 
