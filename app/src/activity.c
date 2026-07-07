@@ -43,6 +43,7 @@ static enum zmk_activity_state activity_state;
 static uint32_t activity_last_uptime;
 
 #define MAX_IDLE_MS CONFIG_ZMK_IDLE_TIMEOUT
+#define IDLE_STATE_ENABLED (CONFIG_ZMK_IDLE_TIMEOUT > 0)
 
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
 #define MAX_SLEEP_MS CONFIG_ZMK_IDLE_SLEEP_TIMEOUT
@@ -88,7 +89,7 @@ void activity_work_handler(struct k_work *work) {
         sys_poweroff();
     } else
 #endif /* IS_ENABLED(CONFIG_ZMK_SLEEP) */
-        if (inactive_time > MAX_IDLE_MS) {
+        if (IDLE_STATE_ENABLED && inactive_time > MAX_IDLE_MS) {
             set_state(ZMK_ACTIVITY_IDLE);
         }
 }

@@ -400,6 +400,9 @@ endif # ZMK_BATTERY_REPORTING
 config ZMK_IDLE_TIMEOUT
     int "Milliseconds of inactivity before entering idle state (OLED shutoff, etc)"
     default 30000
+    help
+      Milliseconds of inactivity before entering idle state.
+      Set to 0 to disable idle state transitions.
 
 config ZMK_SLEEP
     bool "Enable deep sleep support"
