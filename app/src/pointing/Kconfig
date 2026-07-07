@@ -70,6 +70,40 @@ config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT
       when the real-world failure is known to recover from a central-side power
       cycle or reboot.
 
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG
+    bool "Temporary Layer hardware watchdog reset"
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER
+    select WATCHDOG
+    help
+      Start the SoC hardware watchdog and keep feeding it while temporary layer
+      activity is healthy. If a temporary layer remains active past the hard
+      watchdog deadline, feeding stops and the SoC resets even if normal work
+      queue based recovery is stuck.
+
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_STUCK_TIMEOUT_MS
+    int "Temporary Layer hardware watchdog stuck timeout in milliseconds"
+    default 20000
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG
+    help
+      If the temporary layer is still armed this long after the most recent
+      pointing/excluded-key activity, stop feeding the hardware watchdog.
+
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_RESET_MS
+    int "Temporary Layer hardware watchdog reset window in milliseconds"
+    default 8000
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG
+    help
+      Hardware watchdog timeout window. Once feeding stops, the MCU should reset
+      within roughly this time.
+
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_FEED_MS
+    int "Temporary Layer hardware watchdog feed interval in milliseconds"
+    default 1000
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG
+    help
+      How often to feed the hardware watchdog while the temporary layer state is
+      healthy. Must be lower than the reset window.
+
 config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
     bool "AML Studio RPC (live config via ZMK Studio)"
     depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER

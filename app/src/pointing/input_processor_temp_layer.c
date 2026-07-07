@@ -10,6 +10,10 @@
 #include <zephyr/device.h>
 #include <drivers/input_processor.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG)
+#include <zephyr/drivers/watchdog.h>
+#include <zephyr/sys/atomic.h>
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT)
 #include <zephyr/sys/reboot.h>
 #endif
@@ -31,6 +35,133 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Constants and Types */
 #define MAX_LAYERS ZMK_KEYMAP_LAYERS_LEN
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG)
+#define TEMP_LAYER_HARD_WDT_NODE DT_NODELABEL(wdt0)
+
+BUILD_ASSERT(DT_NODE_HAS_STATUS(TEMP_LAYER_HARD_WDT_NODE, okay),
+             "CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG requires wdt0");
+BUILD_ASSERT(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_FEED_MS <
+                 CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_RESET_MS,
+             "HARD_WATCHDOG_FEED_MS must be lower than HARD_WATCHDOG_RESET_MS");
+
+static const struct device *const temp_layer_hard_wdt = DEVICE_DT_GET(TEMP_LAYER_HARD_WDT_NODE);
+static struct k_timer temp_layer_hard_wdt_timer;
+static int temp_layer_hard_wdt_channel = -1;
+static atomic_t temp_layer_hard_wdt_ready;
+static atomic_t temp_layer_hard_wdt_deadline;
+static atomic_t temp_layer_hard_wdt_armed_layer;
+static atomic_t temp_layer_hard_wdt_feed_blocked;
+
+static void temp_layer_hard_wdt_arm(uint8_t layer) {
+    if (!atomic_get(&temp_layer_hard_wdt_ready)) {
+        return;
+    }
+
+    atomic_set(&temp_layer_hard_wdt_armed_layer, layer + 1);
+    atomic_set(&temp_layer_hard_wdt_deadline,
+               k_uptime_get_32() +
+                   CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_STUCK_TIMEOUT_MS);
+    atomic_clear(&temp_layer_hard_wdt_feed_blocked);
+}
+
+static void temp_layer_hard_wdt_extend(uint8_t layer) {
+    if (atomic_get(&temp_layer_hard_wdt_armed_layer) != layer + 1) {
+        return;
+    }
+
+    atomic_set(&temp_layer_hard_wdt_deadline,
+               k_uptime_get_32() +
+                   CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_STUCK_TIMEOUT_MS);
+    atomic_clear(&temp_layer_hard_wdt_feed_blocked);
+}
+
+static void temp_layer_hard_wdt_disarm(uint8_t layer) {
+    if (atomic_get(&temp_layer_hard_wdt_armed_layer) != layer + 1) {
+        return;
+    }
+
+    atomic_clear(&temp_layer_hard_wdt_armed_layer);
+    atomic_clear(&temp_layer_hard_wdt_deadline);
+    atomic_clear(&temp_layer_hard_wdt_feed_blocked);
+}
+
+static void temp_layer_hard_wdt_timer_cb(struct k_timer *timer) {
+    if (!atomic_get(&temp_layer_hard_wdt_ready)) {
+        return;
+    }
+
+    if (atomic_get(&temp_layer_hard_wdt_feed_blocked)) {
+        return;
+    }
+
+    uint32_t deadline = (uint32_t)atomic_get(&temp_layer_hard_wdt_deadline);
+    if (deadline != 0 && (int32_t)(k_uptime_get_32() - deadline) >= 0) {
+        atomic_set(&temp_layer_hard_wdt_feed_blocked, 1);
+        LOG_ERR("Temporary layer hard watchdog expired for layer %d; waiting for WDT reset",
+                atomic_get(&temp_layer_hard_wdt_armed_layer) - 1);
+        return;
+    }
+
+    int ret = wdt_feed(temp_layer_hard_wdt, temp_layer_hard_wdt_channel);
+    if (ret < 0) {
+        LOG_WRN("Temporary layer hard watchdog feed failed (%d)", ret);
+    }
+}
+
+static int temp_layer_hard_wdt_init(void) {
+    static bool initialized;
+
+    if (initialized) {
+        return 0;
+    }
+
+    initialized = true;
+
+    if (!device_is_ready(temp_layer_hard_wdt)) {
+        LOG_ERR("Temporary layer hard watchdog device is not ready");
+        return -ENODEV;
+    }
+
+    struct wdt_timeout_cfg cfg = {
+        .flags = WDT_FLAG_RESET_SOC,
+        .window = {
+            .min = 0,
+            .max = CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_RESET_MS,
+        },
+    };
+
+    temp_layer_hard_wdt_channel = wdt_install_timeout(temp_layer_hard_wdt, &cfg);
+    if (temp_layer_hard_wdt_channel < 0) {
+        LOG_ERR("Temporary layer hard watchdog install failed (%d)",
+                temp_layer_hard_wdt_channel);
+        return temp_layer_hard_wdt_channel;
+    }
+
+    int ret = wdt_setup(temp_layer_hard_wdt, WDT_OPT_PAUSE_HALTED_BY_DBG);
+    if (ret < 0) {
+        LOG_ERR("Temporary layer hard watchdog setup failed (%d)", ret);
+        return ret;
+    }
+
+    atomic_set(&temp_layer_hard_wdt_ready, 1);
+    k_timer_init(&temp_layer_hard_wdt_timer, temp_layer_hard_wdt_timer_cb, NULL);
+    k_timer_start(&temp_layer_hard_wdt_timer,
+                  K_MSEC(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_FEED_MS),
+                  K_MSEC(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_FEED_MS));
+
+    LOG_INF("Temporary layer hard watchdog started: stuck=%dms reset=%dms",
+            CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_STUCK_TIMEOUT_MS,
+            CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_HARD_WATCHDOG_RESET_MS);
+
+    return 0;
+}
+#else
+static void temp_layer_hard_wdt_arm(uint8_t layer) {}
+static void temp_layer_hard_wdt_extend(uint8_t layer) {}
+static void temp_layer_hard_wdt_disarm(uint8_t layer) {}
+static int temp_layer_hard_wdt_init(void) { return 0; }
+#endif
 
 struct temp_layer_config {
     int16_t require_prior_idle_ms;
@@ -398,11 +529,13 @@ static void layer_action_work_cb(struct k_work *work) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
             cancel_stuck_recovery(action.layer);
 #endif
+            temp_layer_hard_wdt_disarm(action.layer);
         } else {
             update_layer_state(&data->state, true);
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
             schedule_stuck_recovery(action.layer);
 #endif
+            temp_layer_hard_wdt_arm(action.layer);
         }
     }
 
@@ -451,6 +584,7 @@ static void layer_stuck_recovery_callback(struct k_work *work) {
     }
 
     zmk_keymap_layer_deactivate(layer_id, false);
+    temp_layer_hard_wdt_disarm(layer_index);
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT)
     LOG_WRN("Rebooting after temporary layer stuck recovery");
@@ -474,6 +608,7 @@ static int handle_layer_state_changed(const struct device *dev, const zmk_event_
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
         cancel_stuck_recovery(data->state.toggle_layer);
 #endif
+        temp_layer_hard_wdt_disarm(data->state.toggle_layer);
     }
     ret = k_mutex_unlock(&data->lock);
     if (ret < 0) {
@@ -501,6 +636,7 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
         if (!position_is_excluded(cfg, ev->position)) {
             LOG_DBG("Position not excluded, deactivating layer");
             update_layer_state(&data->state, false);
+            temp_layer_hard_wdt_disarm(data->state.toggle_layer);
         } else {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
             /* Excluded key pressed while AML is active: extend the dwell timer
@@ -514,6 +650,7 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
                 schedule_stuck_recovery(data->state.toggle_layer);
 #endif
+                temp_layer_hard_wdt_extend(data->state.toggle_layer);
                 LOG_DBG("Excluded position, extending AML by %u ms", timeout_ms);
             }
 #else
@@ -647,6 +784,7 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
         schedule_stuck_recovery(param1);
 #endif
+        temp_layer_hard_wdt_extend(param1);
     }
 
     k_mutex_unlock(&data->lock);
@@ -679,6 +817,11 @@ static int temp_layer_init(const struct device *dev) {
     }
     /* deactivation_ms defaults captured on first handle_event (see param2 comment) */
 #endif
+
+    int err = temp_layer_hard_wdt_init();
+    if (err < 0) {
+        LOG_WRN("Temporary layer hard watchdog disabled after init error (%d)", err);
+    }
 
     return 0;
 }
