@@ -45,6 +45,31 @@ config ZMK_INPUT_PROCESSOR_TEMP_LAYER_MAX_ACTION_EVENTS
     default 4
     depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER
 
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY
+    bool "Temporary Layer stuck recovery watchdog"
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER
+    help
+      Add a delayed recovery check for temporary layers that remain active far
+      longer than their normal dwell timeout. This is intended to recover from
+      a lost/deferred deactivate work item without changing normal layer use.
+
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_TIMEOUT_MS
+    int "Temporary Layer stuck recovery timeout in milliseconds"
+    default 30000
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY
+    help
+      If the temporary layer is still active after this much time without
+      renewed pointing/excluded-key activity, force a layer deactivation.
+
+config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT
+    bool "Reboot after temporary layer stuck recovery"
+    depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY
+    select REBOOT
+    help
+      Reboot the central MCU after the forced layer deactivation. Use this only
+      when the real-world failure is known to recover from a central-side power
+      cycle or reboot.
+
 config ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC
     bool "AML Studio RPC (live config via ZMK Studio)"
     depends on ZMK_INPUT_PROCESSOR_TEMP_LAYER

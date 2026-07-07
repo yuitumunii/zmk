@@ -10,6 +10,9 @@
 #include <zephyr/device.h>
 #include <drivers/input_processor.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT)
+#include <zephyr/sys/reboot.h>
+#endif
 #include <zmk/keymap.h>
 #include <zmk/behavior.h>
 #include <zmk/events/position_state_changed.h>
@@ -49,6 +52,9 @@ struct temp_layer_data {
 
 /* Static Work Queue Items */
 static struct k_work_delayable layer_disable_works[MAX_LAYERS];
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+static struct k_work_delayable layer_stuck_recovery_works[MAX_LAYERS];
+#endif
 
 /* ---- AML runtime (RAM-ified config for live Studio RPC tuning) ----------- */
 /* Only compiled when the Studio RPC is enabled. The hot-paths always use     */
@@ -352,6 +358,17 @@ static void update_layer_state(struct temp_layer_state *state, bool activate) {
     }
 }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+static void schedule_stuck_recovery(uint8_t layer) {
+    k_work_reschedule(&layer_stuck_recovery_works[layer],
+                      K_MSEC(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_TIMEOUT_MS));
+}
+
+static void cancel_stuck_recovery(uint8_t layer) {
+    k_work_cancel_delayable(&layer_stuck_recovery_works[layer]);
+}
+#endif
+
 struct layer_state_action {
     uint8_t layer;
     bool activate;
@@ -378,8 +395,14 @@ static void layer_action_work_cb(struct k_work *work) {
             if (zmk_keymap_layer_active(action.layer)) {
                 update_layer_state(&data->state, false);
             }
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+            cancel_stuck_recovery(action.layer);
+#endif
         } else {
             update_layer_state(&data->state, true);
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+            schedule_stuck_recovery(action.layer);
+#endif
         }
     }
 
@@ -400,6 +423,42 @@ static void layer_disable_callback(struct k_work *work) {
     k_work_submit(&layer_action_work);
 }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+static void layer_stuck_recovery_callback(struct k_work *work) {
+    struct k_work_delayable *d_work = k_work_delayable_from_work(work);
+    int layer_index = ARRAY_INDEX(layer_stuck_recovery_works, d_work);
+    zmk_keymap_layer_id_t layer_id = zmk_keymap_layer_index_to_id(layer_index);
+
+    if (!zmk_keymap_layer_active(layer_id)) {
+        return;
+    }
+
+    LOG_WRN("Temporary layer %d remained active for %d ms; forcing recovery", layer_index,
+            CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_TIMEOUT_MS);
+
+    const struct device *dev = DEVICE_DT_INST_GET(0);
+    struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
+
+    int ret = k_mutex_lock(&data->lock, K_MSEC(100));
+    if (ret == 0) {
+        if (data->state.toggle_layer == layer_index) {
+            data->state.is_active = false;
+        }
+        k_work_cancel_delayable(&layer_disable_works[layer_index]);
+        k_mutex_unlock(&data->lock);
+    } else {
+        LOG_WRN("Could not lock temp layer state for stuck recovery (%d)", ret);
+    }
+
+    zmk_keymap_layer_deactivate(layer_id, false);
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_REBOOT)
+    LOG_WRN("Rebooting after temporary layer stuck recovery");
+    sys_reboot(SYS_REBOOT_WARM);
+#endif
+}
+#endif
+
 /* ---- Event Handlers ------------------------------------------------------ */
 
 static int handle_layer_state_changed(const struct device *dev, const zmk_event_t *eh) {
@@ -412,6 +471,9 @@ static int handle_layer_state_changed(const struct device *dev, const zmk_event_
         LOG_DBG("Deactivating layer that was activated by this processor");
         data->state.is_active = false;
         k_work_cancel_delayable(&layer_disable_works[data->state.toggle_layer]);
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+        cancel_stuck_recovery(data->state.toggle_layer);
+#endif
     }
     ret = k_mutex_unlock(&data->lock);
     if (ret < 0) {
@@ -449,6 +511,9 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
             if (timeout_ms > 0) {
                 k_work_reschedule(&layer_disable_works[data->state.toggle_layer],
                                   K_MSEC(timeout_ms));
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+                schedule_stuck_recovery(data->state.toggle_layer);
+#endif
                 LOG_DBG("Excluded position, extending AML by %u ms", timeout_ms);
             }
 #else
@@ -579,6 +644,9 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 
     if (timeout_ms > 0) {
         k_work_reschedule(&layer_disable_works[param1], K_MSEC(timeout_ms));
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+        schedule_stuck_recovery(param1);
+#endif
     }
 
     k_mutex_unlock(&data->lock);
@@ -592,6 +660,9 @@ static int temp_layer_init(const struct device *dev) {
 
     for (int i = 0; i < MAX_LAYERS; i++) {
         k_work_init_delayable(&layer_disable_works[i], layer_disable_callback);
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+        k_work_init_delayable(&layer_stuck_recovery_works[i], layer_stuck_recovery_callback);
+#endif
     }
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
