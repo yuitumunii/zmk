@@ -99,7 +99,7 @@ static void temp_layer_hard_wdt_timer_cb(struct k_timer *timer) {
     if (deadline != 0 && (int32_t)(k_uptime_get_32() - deadline) >= 0) {
         atomic_set(&temp_layer_hard_wdt_feed_blocked, 1);
         LOG_ERR("Temporary layer hard watchdog expired for layer %d; waiting for WDT reset",
-                atomic_get(&temp_layer_hard_wdt_armed_layer) - 1);
+                (int)atomic_get(&temp_layer_hard_wdt_armed_layer) - 1);
         return;
     }
 
@@ -552,7 +552,7 @@ static void layer_disable_callback(struct k_work *work) {
 
     struct layer_state_action action = {.layer = layer_index, .activate = false};
 
-    int ret = k_msgq_put(&temp_layer_action_msgq, &action, K_MSEC(10));
+    k_msgq_put(&temp_layer_action_msgq, &action, K_MSEC(10));
     k_work_submit(&layer_action_work);
 }
 
