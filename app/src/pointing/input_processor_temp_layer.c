@@ -472,20 +472,25 @@ static bool should_quick_tap(const struct temp_layer_config *config, int64_t las
 
 /* ---- Layer State Management ---------------------------------------------- */
 
-static void update_layer_state(struct temp_layer_state *state, bool activate) {
-    /* is_active は handle_event 側で AML 予約時に即セットされることがあるため、
-     * 早期 return せず、実レイヤー状態を基準に activate/deactivate を冪等に行う。
-     * これにより「AML に入った直後の窓で除外キーを押すと延長(extend)が効かない」
-     * race を解消する(is_active を先に立ててもレイヤー有効化が二重/欠落しない)。 */
+static bool set_layer_state_locked(struct temp_layer_state *state, uint8_t layer, bool activate) {
+    /* Only mutate temp-layer state here. zmk_keymap_layer_activate/deactivate raises
+     * layer_state_changed synchronously, so calling it while holding data->lock can
+     * re-enter this listener and deadlock the input path. */
+    state->toggle_layer = layer;
     state->is_active = activate;
-    bool layer_on =
-        zmk_keymap_layer_active(zmk_keymap_layer_index_to_id(state->toggle_layer));
+
+    bool layer_on = zmk_keymap_layer_active(zmk_keymap_layer_index_to_id(layer));
+    return activate ? !layer_on : layer_on;
+}
+
+static void apply_layer_state_unlocked(uint8_t layer, bool activate) {
+    bool layer_on = zmk_keymap_layer_active(zmk_keymap_layer_index_to_id(layer));
     if (activate && !layer_on) {
-        zmk_keymap_layer_activate(state->toggle_layer, false);
-        LOG_DBG("Layer %d activated", state->toggle_layer);
+        zmk_keymap_layer_activate(layer, false);
+        LOG_DBG("Layer %d activated", layer);
     } else if (!activate && layer_on) {
-        zmk_keymap_layer_deactivate(state->toggle_layer, false);
-        LOG_DBG("Layer %d deactivated", state->toggle_layer);
+        zmk_keymap_layer_deactivate(layer, false);
+        LOG_DBG("Layer %d deactivated", layer);
     }
 }
 
@@ -513,33 +518,42 @@ static void layer_action_work_cb(struct k_work *work) {
     const struct device *dev = DEVICE_DT_INST_GET(0);
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
 
-    int ret = k_mutex_lock(&data->lock, K_FOREVER);
-    if (ret < 0) {
-        LOG_ERR("Error locking for updating %d", ret);
-        return;
-    }
-
     struct layer_state_action action;
 
     while (k_msgq_get(&temp_layer_action_msgq, &action, K_MSEC(10)) >= 0) {
+        bool apply_layer_change = false;
+
+        int ret = k_mutex_lock(&data->lock, K_FOREVER);
+        if (ret < 0) {
+            LOG_ERR("Error locking for updating %d", ret);
+            continue;
+        }
+
         if (!action.activate) {
-            if (zmk_keymap_layer_active(action.layer)) {
-                update_layer_state(&data->state, false);
-            }
+            apply_layer_change = set_layer_state_locked(&data->state, action.layer, false);
+            k_work_cancel_delayable(&layer_disable_works[action.layer]);
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
             cancel_stuck_recovery(action.layer);
 #endif
-            temp_layer_hard_wdt_disarm(action.layer);
         } else {
-            update_layer_state(&data->state, true);
+            apply_layer_change = set_layer_state_locked(&data->state, action.layer, true);
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
             schedule_stuck_recovery(action.layer);
 #endif
+        }
+
+        k_mutex_unlock(&data->lock);
+
+        if (apply_layer_change) {
+            apply_layer_state_unlocked(action.layer, action.activate);
+        }
+
+        if (!action.activate) {
+            temp_layer_hard_wdt_disarm(action.layer);
+        } else {
             temp_layer_hard_wdt_arm(action.layer);
         }
     }
-
-    k_mutex_unlock(&data->lock);
 }
 
 static K_WORK_DEFINE(layer_action_work, layer_action_work_cb);
@@ -597,9 +611,9 @@ static void layer_stuck_recovery_callback(struct k_work *work) {
 
 static int handle_layer_state_changed(const struct device *dev, const zmk_event_t *eh) {
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
-    int ret = k_mutex_lock(&data->lock, K_FOREVER);
+    int ret = k_mutex_lock(&data->lock, K_NO_WAIT);
     if (ret < 0) {
-        return ret;
+        return ZMK_EV_EVENT_BUBBLE;
     }
     if (!zmk_keymap_layer_active(zmk_keymap_layer_index_to_id(data->state.toggle_layer))) {
         LOG_DBG("Deactivating layer that was activated by this processor");
@@ -631,26 +645,36 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
     }
 
     const struct temp_layer_config *cfg = dev->config;
+    bool apply_layer_change = false;
+    uint8_t layer = data->state.toggle_layer;
+    bool deactivate_layer = false;
+    bool disarm_watchdog = false;
 
     if (data->state.is_active) {
         if (!position_is_excluded(cfg, ev->position)) {
             LOG_DBG("Position not excluded, deactivating layer");
-            update_layer_state(&data->state, false);
-            temp_layer_hard_wdt_disarm(data->state.toggle_layer);
+            layer = data->state.toggle_layer;
+            apply_layer_change = set_layer_state_locked(&data->state, layer, false);
+            k_work_cancel_delayable(&layer_disable_works[layer]);
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
+            cancel_stuck_recovery(layer);
+#endif
+            deactivate_layer = true;
+            disarm_watchdog = true;
         } else {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUDIO_RPC)
             /* Excluded key pressed while AML is active: extend the dwell timer
              * from now, so actively clicking (e.g. K / left-click) keeps the
              * mouse layer alive just like trackball motion does. The amount is
              * a separate, app-adjustable value (defaults to the dwell). */
+            layer = data->state.toggle_layer;
             uint32_t timeout_ms = aml_rt.extend_ms;
             if (timeout_ms > 0) {
-                k_work_reschedule(&layer_disable_works[data->state.toggle_layer],
-                                  K_MSEC(timeout_ms));
+                k_work_reschedule(&layer_disable_works[layer], K_MSEC(timeout_ms));
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
-                schedule_stuck_recovery(data->state.toggle_layer);
+                schedule_stuck_recovery(layer);
 #endif
-                temp_layer_hard_wdt_extend(data->state.toggle_layer);
+                temp_layer_hard_wdt_extend(layer);
                 LOG_DBG("Excluded position, extending AML by %u ms", timeout_ms);
             }
 #else
@@ -660,6 +684,13 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
     }
 
     k_mutex_unlock(&data->lock);
+
+    if (deactivate_layer && apply_layer_change) {
+        apply_layer_state_unlocked(layer, false);
+    }
+    if (disarm_watchdog) {
+        temp_layer_hard_wdt_disarm(layer);
+    }
 
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -766,7 +797,7 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
         /* is_active を予約時に即セットする。こうしないと activate が work queue
          * 経由で遅れて反映されるまでの窓で除外キーを押しても is_active==false で
          * 延長(extend)分岐に入れず、AML 延長が効かない。実際のレイヤー有効化は
-         * 従来どおり work queue 経由(update_layer_state を冪等化済み)。 */
+         * lock を解放した後の work queue 経由で行う。 */
         data->state.is_active = true;
         struct layer_state_action action = {.layer = param1, .activate = true};
 
