@@ -513,6 +513,9 @@ struct layer_state_action {
 K_MSGQ_DEFINE(temp_layer_action_msgq, sizeof(struct layer_state_action),
               CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_MAX_ACTION_EVENTS, 4);
 
+static void layer_action_work_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(layer_action_work, layer_action_work_cb);
+
 static void layer_action_work_cb(struct k_work *work) {
 
     const struct device *dev = DEVICE_DT_INST_GET(0);
@@ -520,13 +523,17 @@ static void layer_action_work_cb(struct k_work *work) {
 
     struct layer_state_action action;
 
-    while (k_msgq_get(&temp_layer_action_msgq, &action, K_MSEC(10)) >= 0) {
+    while (k_msgq_get(&temp_layer_action_msgq, &action, K_NO_WAIT) >= 0) {
         bool apply_layer_change = false;
 
-        int ret = k_mutex_lock(&data->lock, K_FOREVER);
+        int ret = k_mutex_lock(&data->lock, K_MSEC(20));
         if (ret < 0) {
-            LOG_ERR("Error locking for updating %d", ret);
-            continue;
+            LOG_WRN("Temporary layer action deferred; state lock busy (%d)", ret);
+            if (k_msgq_put(&temp_layer_action_msgq, &action, K_NO_WAIT) < 0) {
+                LOG_ERR("Failed to requeue temporary layer action for layer %d", action.layer);
+            }
+            k_work_schedule(&layer_action_work, K_MSEC(1));
+            break;
         }
 
         if (!action.activate) {
@@ -556,8 +563,6 @@ static void layer_action_work_cb(struct k_work *work) {
     }
 }
 
-static K_WORK_DEFINE(layer_action_work, layer_action_work_cb);
-
 /* ---- Work Queue Callback ------------------------------------------------- */
 
 static void layer_disable_callback(struct k_work *work) {
@@ -566,8 +571,13 @@ static void layer_disable_callback(struct k_work *work) {
 
     struct layer_state_action action = {.layer = layer_index, .activate = false};
 
-    k_msgq_put(&temp_layer_action_msgq, &action, K_MSEC(10));
-    k_work_submit(&layer_action_work);
+    int ret = k_msgq_put(&temp_layer_action_msgq, &action, K_NO_WAIT);
+    if (ret < 0) {
+        LOG_ERR("Failed to enqueue action to disable layer %d (%d)", layer_index, ret);
+        return;
+    }
+
+    k_work_schedule(&layer_action_work, K_NO_WAIT);
 }
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
@@ -639,9 +649,10 @@ static int handle_position_state_changed(const struct device *dev, const zmk_eve
     }
 
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
-    int ret = k_mutex_lock(&data->lock, K_FOREVER);
+    int ret = k_mutex_lock(&data->lock, K_NO_WAIT);
     if (ret < 0) {
-        return ret;
+        LOG_WRN("Skipping position-state temp-layer handling; state lock busy (%d)", ret);
+        return ZMK_EV_EVENT_BUBBLE;
     }
 
     const struct temp_layer_config *cfg = dev->config;
@@ -703,9 +714,10 @@ static int handle_keycode_state_changed(const struct device *dev, const zmk_even
 
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
 
-    int ret = k_mutex_lock(&data->lock, K_FOREVER);
+    int ret = k_mutex_lock(&data->lock, K_NO_WAIT);
     if (ret < 0) {
-        return ret;
+        LOG_WRN("Skipping keycode-state temp-layer handling; state lock busy (%d)", ret);
+        return ZMK_EV_EVENT_BUBBLE;
     }
 
     LOG_DBG("Setting last_tapped_timestamp to: %lld", ev->timestamp);
@@ -760,9 +772,10 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 
     struct temp_layer_data *data = (struct temp_layer_data *)dev->data;
 
-    int ret = k_mutex_lock(&data->lock, K_FOREVER);
+    int ret = k_mutex_lock(&data->lock, K_NO_WAIT);
     if (ret < 0) {
-        return ret;
+        LOG_WRN("Skipping temp-layer input handling; state lock busy (%d)", ret);
+        return ZMK_INPUT_PROC_CONTINUE;
     }
 
     const struct temp_layer_config *cfg = dev->config;
@@ -792,6 +805,9 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
     uint32_t timeout_ms = param2;
 #endif
 
+    bool arm_watchdog = false;
+    bool extend_watchdog = false;
+
     if (!data->state.is_active &&
         !should_quick_tap(cfg, data->state.last_tapped_timestamp, k_uptime_get())) {
         /* is_active を予約時に即セットする。こうしないと activate が work queue
@@ -806,7 +822,8 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
             LOG_ERR("Failed to enqueue action to enable layer %d (%d)", param1, ret);
             data->state.is_active = false;
         } else {
-            k_work_submit(&layer_action_work);
+            arm_watchdog = true;
+            k_work_schedule(&layer_action_work, K_NO_WAIT);
         }
     }
 
@@ -815,10 +832,16 @@ static int temp_layer_handle_event(const struct device *dev, struct input_event 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_TEMP_LAYER_STUCK_RECOVERY)
         schedule_stuck_recovery(param1);
 #endif
-        temp_layer_hard_wdt_extend(param1);
+        extend_watchdog = true;
     }
 
     k_mutex_unlock(&data->lock);
+
+    if (arm_watchdog) {
+        temp_layer_hard_wdt_arm(param1);
+    } else if (extend_watchdog) {
+        temp_layer_hard_wdt_extend(param1);
+    }
 
     return ZMK_INPUT_PROC_CONTINUE;
 }
