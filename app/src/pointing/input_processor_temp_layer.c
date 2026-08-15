@@ -516,6 +516,11 @@ K_MSGQ_DEFINE(temp_layer_action_msgq, sizeof(struct layer_state_action),
 static void layer_action_work_cb(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(layer_action_work, layer_action_work_cb);
 
+/* Deactivation is the only thing that turns a temporary layer back off. If its
+ * queue slot is unavailable we must come back for it rather than drop it, or
+ * the layer stays on for good. */
+#define TEMP_LAYER_REQUEUE_DELAY_MS 10
+
 static void layer_action_work_cb(struct k_work *work) {
 
     const struct device *dev = DEVICE_DT_INST_GET(0);
@@ -530,7 +535,15 @@ static void layer_action_work_cb(struct k_work *work) {
         if (ret < 0) {
             LOG_WRN("Temporary layer action deferred; state lock busy (%d)", ret);
             if (k_msgq_put(&temp_layer_action_msgq, &action, K_NO_WAIT) < 0) {
-                LOG_ERR("Failed to requeue temporary layer action for layer %d", action.layer);
+                LOG_WRN("Could not requeue layer %d action (%s)", action.layer,
+                        action.activate ? "activate" : "deactivate");
+                /* Losing an activation only costs one missed AML trigger, but
+                 * losing a deactivation strands the layer, so send it back
+                 * through the timer that owns it. */
+                if (!action.activate) {
+                    k_work_reschedule(&layer_disable_works[action.layer],
+                                      K_MSEC(TEMP_LAYER_REQUEUE_DELAY_MS));
+                }
             }
             k_work_schedule(&layer_action_work, K_MSEC(1));
             break;
@@ -573,7 +586,11 @@ static void layer_disable_callback(struct k_work *work) {
 
     int ret = k_msgq_put(&temp_layer_action_msgq, &action, K_NO_WAIT);
     if (ret < 0) {
-        LOG_ERR("Failed to enqueue action to disable layer %d (%d)", layer_index, ret);
+        /* The queue fills when the system workqueue stalls long enough for the
+         * input thread to pile up activations. Returning here used to strand the
+         * layer on with nothing left to switch it off. */
+        LOG_WRN("Layer %d deactivation not queued (%d); retrying", layer_index, ret);
+        k_work_reschedule(d_work, K_MSEC(TEMP_LAYER_REQUEUE_DELAY_MS));
         return;
     }
 
